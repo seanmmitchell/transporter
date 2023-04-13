@@ -4,7 +4,7 @@
 A system for managing state and configurations and collecting inputs. Helps managed environment variables, command line arguments, and JSON/YML configuration files.
 
 ## How to Install
-    go get -u github.com/seanmmitchll/transporter
+    go get -u github.com/seanmmitchell/transporter
 
 ## How to Use
 
