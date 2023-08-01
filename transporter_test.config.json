@@ -1,0 +1,20 @@
+{
+	"user-age": {
+		"Name": "User's Age",
+		"Description": "A variable for holding the user's age.",
+		"Required": false,
+		"Value": "2500"
+	},
+	"user-id": {
+		"Name": "User's ID",
+		"Description": "Description",
+		"Required": false,
+		"Value": "adwadwa"
+	},
+	"user-name": {
+		"Name": "User's Name",
+		"Description": "A variable for holding the user's name.",
+		"Required": false,
+		"Value": "sean"
+	}
+}
