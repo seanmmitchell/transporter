@@ -190,6 +190,7 @@ func (state *State) Materialize() error {
 	for key, pattern := range oldPattern.Sequences {
 		if pattern.DisablePersistence {
 			pattern.Value = CONF_DisablePersistence_Phrase
+			pattern.Value = CONF_DisablePersistence_Phrase
 			oldPattern.Sequences[key] = pattern
 		}
 	}
