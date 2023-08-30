@@ -37,9 +37,10 @@ func TestMain(t *testing.T) {
 					CLIFlags:    []string{"i", "id"},
 				},
 				"user-age": {
-					Name:        "User's Age",
-					Description: "A variable for holding the user's age.",
-					CLIFlags:    []string{"a", "age"},
+					Name:               "User's Age",
+					Description:        "A variable for holding the user's age.",
+					CLIFlags:           []string{"a", "age"},
+					DisablePersistence: true,
 				},
 				"user-name": {
 					Name:        "User's Name",
@@ -65,12 +66,12 @@ func TestMain(t *testing.T) {
 
 	var val string
 	val, _ = pattern.Get("user-age")
-	fmt.Println(val)
+	fmt.Println("User Age: ", val)
 
-	pattern.Set("user-age", "2500")
+	pattern.Set("user-age", "40")
 
 	val, _ = pattern.Get("user-age")
-	fmt.Println(val)
+	fmt.Println("User Age: ", val)
 
 	err = pattern.Materialize()
 

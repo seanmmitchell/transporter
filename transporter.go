@@ -63,7 +63,7 @@ var defaultTransporterOpts = TransporterOptions{
 	DumpCLIArguments:         false,
 }
 
-const CONF_DisablePersistence_FLAG = "no persistence"
+const CONF_DisablePersistence_Phrase = "no persistence"
 
 func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	// Permitted Pattern Names: a-zA-Z0-9.-_
@@ -97,11 +97,16 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 			for confKey, confData := range jsonData {
 				confVal, ok := confData.(map[string]interface{})
 				if ok {
-					// Get the Value and Check if Persistent
+					// Get the Pattern
 					value, valueExists := confVal["Value"].(string)
 					if valueExists {
-						if value != CONF_DisablePersistence_FLAG {
-							associatePattern(jstonLE, &pattern, confKey, value)
+
+						// Check if it's persistence is disabled.
+						disabledPersistence, valueExists := confVal["DisablePersistence"].(bool)
+						if valueExists {
+							if !disabledPersistence {
+								associatePattern(jstonLE, &pattern, confKey, value)
+							}
 						}
 					} else {
 						jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
@@ -185,7 +190,7 @@ func (state *State) Materialize() error {
 
 	for key, pattern := range oldPattern.Sequences {
 		if pattern.DisablePersistence {
-			pattern.Value = CONF_DisablePersistence_FLAG
+			pattern.Value = CONF_DisablePersistence_Phrase
 			oldPattern.Sequences[key] = pattern
 		}
 	}

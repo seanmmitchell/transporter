@@ -1,5 +1,7 @@
 github.com/seanmmitchell/ale v1.0.3-0.20230315044647-a77ba36a6bfd h1:s/9ts+PjCn5zZnEq6/2AQsbWzxSEcGqEfHuGex+fjB4=
 github.com/seanmmitchell/ale v1.0.3-0.20230315044647-a77ba36a6bfd/go.mod h1:6hpHoFIDIjGET3KZmeY+aQei4qX/o0oAx3KoGZtgZqI=
+github.com/seanmmitchell/ale v1.0.3 h1:kU+fV1LGFjfHG1zf92yJ4olRd9ePhaf3lL7MUQGkRsI=
+github.com/seanmmitchell/ale v1.0.3/go.mod h1:6hpHoFIDIjGET3KZmeY+aQei4qX/o0oAx3KoGZtgZqI=
 github.com/wzshiming/ctc v1.2.3 h1:q+hW3IQNsjIlOFBTGZZZeIXTElFM4grF4spW/errh/c=
 github.com/wzshiming/ctc v1.2.3/go.mod h1:2tVAtIY7SUyraSk0JxvwmONNPFL4ARavPuEsg5+KA28=
 github.com/wzshiming/winseq v0.0.0-20200112104235-db357dc107ae/go.mod h1:VTAq37rkGeV+WOybvZwjXiJOicICdpLCN8ifpISjK20=
@@ -8,3 +10,5 @@ github.com/wzshiming/winseq v0.0.0-20200720163736-7fa652d2b50e/go.mod h1:VTAq37r
 golang.org/x/sys v0.0.0-20200107162124-548cf772de50/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.5.0 h1:MUK/U/4lj1t1oPg0HfuXDN/Z1wv31ZJ/YcPiGccS4DU=
 golang.org/x/sys v0.5.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+golang.org/x/sys v0.11.0 h1:eG7RXZHdqOJ1i+0lgLgCpSXAp6M3LYlAo6osgSi0xOM=
+golang.org/x/sys v0.11.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
