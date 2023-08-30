@@ -100,10 +100,9 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 					// Get the Value and Check if Persistent
 					value, valueExists := confVal["Value"].(string)
 					if valueExists {
-						if value == CONF_DisablePersistence_FLAG {
-							continue
+						if value != CONF_DisablePersistence_FLAG {
+							associatePattern(jstonLE, &pattern, confKey, value)
 						}
-						associatePattern(jstonLE, &pattern, confKey, value)
 					} else {
 						jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
 					}
