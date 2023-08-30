@@ -2,22 +2,22 @@
 	"user-age": {
 		"Name": "User's Age",
 		"Description": "A variable for holding the user's age.",
-		"Required": true,
-		"DisablePersistence": true,
-		"Value": "no persistence"
-	},
-	"user-id": {
-		"Name": "User's ID",
-		"Description": "Description",
 		"Required": false,
 		"DisablePersistence": false,
-		"Value": ""
+		"Value": "40"
 	},
-	"user-name": {
-		"Name": "User's Name",
-		"Description": "A variable for holding the user's name.",
+	"user-firstName": {
+		"Name": "User's First Name",
+		"Description": "A variable for holding the User's First Name.",
 		"Required": false,
 		"DisablePersistence": false,
 		"Value": "sean"
+	},
+	"user-lastName": {
+		"Name": "User's Last Name",
+		"Description": "A variable for holding the User's Last Name.",
+		"Required": false,
+		"DisablePersistence": true,
+		"Value": "no persistence"
 	}
 }

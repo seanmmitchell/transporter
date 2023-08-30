@@ -97,17 +97,16 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 			for confKey, confData := range jsonData {
 				confVal, ok := confData.(map[string]interface{})
 				if ok {
-					// Get the Pattern
-					value, valueExists := confVal["Value"].(string)
-					if valueExists {
+					// Check if pattern has persistence.
+					disabledPersitence, ok := confVal["DisabledPersitence"].(bool)
+					if !ok || disabledPersitence {
+						continue
+					}
 
-						// Check if it's persistence is disabled.
-						disabledPersistence, valueExists := confVal["DisablePersistence"].(bool)
-						if valueExists {
-							if !disabledPersistence {
-								associatePattern(jstonLE, &pattern, confKey, value)
-							}
-						}
+					// Get the Pattern
+					value, ok := confVal["Value"].(string)
+					if ok {
+						associatePattern(jstonLE, &pattern, confKey, value)
 					} else {
 						jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
 					}
@@ -203,6 +202,20 @@ func (state *State) Switch() error {
 	return nil
 }
 
+func (state *State) Get(key string) (string, error) {
+	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Getting value for key \"%s\"...", key))
+	pat := state.Active.Load()
+
+	value, ok := pat.Sequences[key]
+	if !ok {
+		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key \"%s\" does not exist.", key))
+		return "", fmt.Errorf("key does not exist")
+	}
+
+	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Retrieved value for key \"%s\".", key))
+	return value.Value, nil
+}
+
 func (state *State) Set(key string, value string) error {
 	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Setting a new value for key \"%s\"...", key))
 	pat := state.Active.Load()
@@ -221,20 +234,6 @@ func (state *State) Set(key string, value string) error {
 	return nil
 }
 
-func (state *State) Get(key string) (string, error) {
-	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Getting value for key \"%s\"...", key))
-	pat := state.Active.Load()
-
-	value, ok := pat.Sequences[key]
-	if !ok {
-		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key \"%s\" does not exist.", key))
-		return "", fmt.Errorf("key does not exist")
-	}
-
-	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Retrieved value for key \"%s\".", key))
-	return value.Value, nil
-}
-
 func associatePattern(le *ale.LogEngine, pattern *Pattern, confIdentifier string, confValue string) bool {
 	le.Log(ale.Debug, "Searching for Pattern...")
 	matchFound := false
@@ -244,11 +243,10 @@ func associatePattern(le *ale.LogEngine, pattern *Pattern, confIdentifier string
 
 			seqCLIFlag := sequence.CLIFlags[indexOfFlag]
 			if confIdentifier == seqCLIFlag || confIdentifier == indexOfSequence {
-				le.Log(ale.Verbose, fmt.Sprintf("A Pattern was Located for \"%s\"", confIdentifier))
-
+				le.Log(ale.Verbose, fmt.Sprintf("A pattern was located \"%s\"", confIdentifier))
 				sequence.Value = confValue
 				matchFound = true
-				le.Log(ale.Verbose, fmt.Sprintf("A Value was assigned to Pattern \"%s\"", confIdentifier))
+				le.Log(ale.Verbose, fmt.Sprintf("The value was assigned to the pattern \"%s\"", confIdentifier))
 				break
 			}
 		}
