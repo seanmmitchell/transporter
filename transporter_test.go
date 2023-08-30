@@ -18,12 +18,14 @@ func TestMain(t *testing.T) {
 
 	// Reset Arguments
 	os.Args = []string{}
-	os.Args = append(os.Args, "--name")
+	os.Args = append(os.Args, "--f")
 	os.Args = append(os.Args, "sean")
-	os.Args = append(os.Args, "--favorite-color")
-	os.Args = append(os.Args, "blue")
+	os.Args = append(os.Args, "--ln")
+	os.Args = append(os.Args, "test")
 	os.Args = append(os.Args, "--age")
-	os.Args = append(os.Args, "22")
+	os.Args = append(os.Args, "21")
+	os.Args = append(os.Args, "--role")
+	os.Args = append(os.Args, "admin")
 
 	le.Log(ale.Debug, "Energizing with Transporter...")
 	tle := le.CreateSubEngine("Transporter")
@@ -31,21 +33,21 @@ func TestMain(t *testing.T) {
 	pattern, err := transporter.Energize(
 		transporter.Pattern{
 			map[string]transporter.PatternSequence{
-				"user-id": {
-					Name:        "User's ID",
-					Description: "Description",
-					CLIFlags:    []string{"i", "id"},
+				"user-firstName": {
+					Name:        "User's First Name",
+					Description: "A variable for holding the User's First Name.",
+					CLIFlags:    []string{"f", "fn"},
 				},
-				"user-age": {
-					Name:               "User's Age",
-					Description:        "A variable for holding the user's age.",
-					CLIFlags:           []string{"a", "age"},
+				"user-lastName": {
+					Name:               "User's Last Name",
+					Description:        "A variable for holding the User's Last Name.",
+					CLIFlags:           []string{"l", "ln"},
 					DisablePersistence: true,
 				},
-				"user-name": {
-					Name:        "User's Name",
-					Description: "A variable for holding the user's name.",
-					CLIFlags:    []string{"n", "name"},
+				"user-age": {
+					Name:        "User's Age",
+					Description: "A variable for holding the user's age.",
+					CLIFlags:    []string{"a", "age"},
 				},
 			},
 		}, transporter.TransporterOptions{
@@ -65,6 +67,9 @@ func TestMain(t *testing.T) {
 	fmt.Println(pattern.Active.Load())
 
 	var val string
+	val, _ = pattern.Get("user-lastName")
+	fmt.Println("User Last Name: ", val)
+
 	val, _ = pattern.Get("user-age")
 	fmt.Println("User Age: ", val)
 
