@@ -2,9 +2,9 @@
 	"user-age": {
 		"Name": "User's Age",
 		"Description": "A variable for holding the user's age.",
-		"Required": false,
-		"DisablePersistence": false,
-		"Value": "2500"
+		"Required": true,
+		"DisablePersistence": true,
+		"Value": "no persistence"
 	},
 	"user-id": {
 		"Name": "User's ID",
