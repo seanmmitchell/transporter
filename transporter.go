@@ -15,6 +15,7 @@ type PatternSequence struct {
 	Description        string   `json:"Description"`
 	Example            string   `json:"-"`
 	Required           bool     `json:"Required"`
+	DisablePersistence bool     `json:"DisablePersistence"`
 	ENVCaseSensitive   bool     `json:"-"`
 	ENVVars            []string `json:"-"`
 	CaseSensitiveFlags bool     `json:"-"`
@@ -62,6 +63,8 @@ var defaultTransporterOpts = TransporterOptions{
 	DumpCLIArguments:         false,
 }
 
+const CONF_DisablePersistence_FLAG = "no persistence"
+
 func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	// Permitted Pattern Names: a-zA-Z0-9.-_
 	// Pattern Map
@@ -94,14 +97,18 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 			for confKey, confData := range jsonData {
 				confVal, ok := confData.(map[string]interface{})
 				if ok {
+					// Get the Value and Check if Persistent
 					value, valueExists := confVal["Value"].(string)
 					if valueExists {
+						if value == CONF_DisablePersistence_FLAG {
+							continue
+						}
 						associatePattern(jstonLE, &pattern, confKey, value)
 					} else {
-						fmt.Println("Value not found for", confKey)
+						jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
 					}
 				} else {
-					fmt.Println("Invalid data format for", confKey)
+					jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value unable to be parsed. Key: %s", confKey))
 				}
 			}
 		} else {
@@ -134,7 +141,7 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	if tOpts.DumpCLIArguments == true || (tOpts.DumpCLIArguments == nil && defaultTransporterOpts.DumpCLIArguments == true) {
 		dumpCLIVariables(le)
 	}
-	fmt.Println(os.Args)
+
 	for indexOfCLIArgs := 0; indexOfCLIArgs < len(os.Args); indexOfCLIArgs++ {
 		arg := os.Args[indexOfCLIArgs]
 
@@ -158,7 +165,7 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 			le.Log(ale.Warning, fmt.Sprintf("Failed to seek value for arg \"%s\"", argName))
 			continue
 		}
-		le.Log(ale.Debug, fmt.Sprintf("New Explicit CLI Arg Found >\n\t> Flag: %s\n\t> Value: %s", argName, argValue))
+		//le.Log(ale.Debug, fmt.Sprintf("New Explicit CLI Arg Found >\n\t> Flag: %s\n\t> Value: %s", argName, argValue))
 
 		// Fetch the Pattern
 		matchFound := associatePattern(le, &pattern, argName, argValue)
@@ -174,7 +181,17 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 }
 
 func (state *State) Materialize() error {
-	state.transporterOptions.ConfigFileEngine.Save(state.logEngine, state.Active.Load())
+	// Filter sequences to remove anything without Persistence.
+	var oldPattern Pattern = (*state.Active.Load())
+
+	for key, pattern := range oldPattern.Sequences {
+		if pattern.DisablePersistence {
+			pattern.Value = CONF_DisablePersistence_FLAG
+			oldPattern.Sequences[key] = pattern
+		}
+	}
+
+	state.transporterOptions.ConfigFileEngine.Save(state.logEngine, state.Active.Swap(&oldPattern))
 	return nil
 }
 
@@ -224,9 +241,10 @@ func associatePattern(le *ale.LogEngine, pattern *Pattern, confIdentifier string
 			seqCLIFlag := sequence.CLIFlags[indexOfFlag]
 			if confIdentifier == seqCLIFlag || confIdentifier == indexOfSequence {
 				le.Log(ale.Verbose, fmt.Sprintf("A Pattern was Located for \"%s\"", confIdentifier))
+
 				sequence.Value = confValue
 				matchFound = true
-				le.Log(ale.Verbose, fmt.Sprintf("A Value was assigned to Pattern \"%s\". Value: \"%s\"", confIdentifier, confValue))
+				le.Log(ale.Verbose, fmt.Sprintf("A Value was assigned to Pattern \"%s\"", confIdentifier))
 				break
 			}
 		}
