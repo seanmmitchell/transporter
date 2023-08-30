@@ -56,6 +56,11 @@ func TestMain(t *testing.T) {
 		},
 	)
 
+	if err != nil {
+		le.Log(ale.Critical, "Failed to energize. ERR: "+err.Error())
+		os.Exit(1)
+	}
+
 	fmt.Println(pattern.Active.Load())
 
 	var val string
