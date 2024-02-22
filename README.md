@@ -11,6 +11,9 @@ Additionally, I (Sean) will say, for my use-case that using Transporter is prett
 ## How to Use
 
 
+## Notes
+Unfortunately, not everything has been implemented with transporter yet due to limited time, so please do apologize the few functions/variables that go no where.
+
 ## General Input Expectations
 | Requirement Type     | Specification                               | Details                                                                                                                                                                           |
 | -------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
