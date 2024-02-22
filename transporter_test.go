@@ -78,6 +78,7 @@ func TestMain(t *testing.T) {
 	}
 
 	// #region JSON Input Tests
+
 	// Close State
 	sampleState = nil
 
@@ -147,6 +148,7 @@ func TestMain(t *testing.T) {
 	} else {
 		le.Log(ale.Info, "Transporter successfully modified a key, materialized and recalled it on a reinitalization.")
 	}
+
 	// #endregion JSON Input Tests
 
 	// #region Environment Variable Tests
