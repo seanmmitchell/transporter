@@ -31,10 +31,6 @@ var sampleCLIArgs1 = []staticTest{
 	{"user-age", "age", "21"},
 }
 
-var sampleCLIArgs2 = []staticTest{
-	{"user-lastName", "ln", "mitchell"},
-}
-
 var pCTX *pconsole.PConsoleCTX
 var estFP = "transporter_test-" + strconv.Itoa(0) + ".config.json"
 
@@ -80,6 +76,8 @@ func TestMain(t *testing.T) {
 	} else {
 		le.Log(ale.Info, "Pattern energized!")
 	}
+
+	// #region JSON Input Tests
 
 	// Close State
 	sampleState = nil
@@ -150,6 +148,34 @@ func TestMain(t *testing.T) {
 	} else {
 		le.Log(ale.Info, "Transporter successfully modified a key, materialized and recalled it on a reinitalization.")
 	}
+
+	// #endregion JSON Input Tests
+
+	// #region Environment Variable Tests
+	// Close State
+	sampleState = nil
+
+	// Set New ENV
+	err452 := os.Setenv("T_LN", "TESTLASTNAME")
+	if err452 != nil {
+		fmt.Printf("Error setting environment variable: %s\n", err452)
+	}
+
+	// Load New State
+	sampleState = createTestState(-1, le, t)
+
+	stateLastName, err10 := sampleState.Get("user-lastName")
+	if err10 != nil {
+		le.Log(ale.Error, "Transporter key \"user-lastName\" value could not be fetched.")
+		t.FailNow()
+	}
+	if stateLastName != "TESTLASTNAME" {
+		le.Log(ale.Error, "Transporter failed to modify \"user-lastName\" via environment variables. | OOB: TESTLASTNAME | Transporter: "+stateLastName)
+		t.FailNow()
+	} else {
+		le.Log(ale.Info, "Transporter successfully modified a key via environment variables.")
+	}
+	// #endregion Environment Variable Tests
 }
 
 func createTestState(testID int, le *ale.LogEngine, t *testing.T) *transporter.State {
@@ -169,17 +195,20 @@ func createTestState(testID int, le *ale.LogEngine, t *testing.T) *transporter.S
 					Name:        "User's First Name",
 					Description: "A variable for holding the User's First Name.",
 					CLIFlags:    []string{"f", "fn"},
+					ENVVars:     []string{"FN"},
 				},
 				sampleCLIArgs1[1].patternKey: {
 					Name:               "User's Last Name",
 					Description:        "A variable for holding the User's Last Name.",
 					CLIFlags:           []string{"l", "ln"},
+					ENVVars:            []string{"LN"},
 					DisablePersistence: true,
 				},
 				sampleCLIArgs1[2].patternKey: {
 					Name:        "User's Age",
 					Description: "A variable for holding the user's age.",
 					CLIFlags:    []string{"a", "age"},
+					ENVVars:     []string{"AGE"},
 				},
 			},
 		}, transporter.TransporterOptions{

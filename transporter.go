@@ -260,22 +260,55 @@ func (state *State) Set(key string, value string) error {
 func associatePattern(le *ale.LogEngine, pattern *Pattern, confIdentifier string, confValue string) bool {
 	le.Log(ale.Debug, "Searching for Pattern...")
 	matchFound := false
-	for indexOfSequence, sequence := range pattern.Sequences {
-		//fmt.Printf("=================\n\tSTART\n\t\tKey: %s \n\t\tValue: %s\n\t\tName: %s\n", key, seq.Value, seq.Name)
-		for indexOfFlag := 0; indexOfFlag < len(sequence.CLIFlags); indexOfFlag++ {
 
+	// Check Each Sequence
+	for indexOfSequence, sequence := range pattern.Sequences {
+		// Check Identifier Match (JSON, ENV, CLI CAN HIT)
+		if indexOfSequence == confIdentifier {
+			le.Log(ale.Verbose, fmt.Sprintf("A config identifier pattern was located \"%s\"", confIdentifier))
+			sequence.Value = confValue
+			matchFound = true
+			le.Log(ale.Verbose, fmt.Sprintf("The config identifier value was assigned to the pattern \"%s\"", confIdentifier))
+		}
+
+		if matchFound {
+			pattern.Sequences[indexOfSequence] = sequence
+			break
+		}
+
+		// Check CLI Match (ENV, CLI CAN HIT)
+		for indexOfFlag := 0; indexOfFlag < len(sequence.CLIFlags); indexOfFlag++ {
 			seqCLIFlag := sequence.CLIFlags[indexOfFlag]
 			if confIdentifier == seqCLIFlag || confIdentifier == indexOfSequence {
-				le.Log(ale.Verbose, fmt.Sprintf("A pattern was located \"%s\"", confIdentifier))
+				le.Log(ale.Verbose, fmt.Sprintf("A cli pattern was located \"%s\"", confIdentifier))
 				sequence.Value = confValue
 				matchFound = true
-				le.Log(ale.Verbose, fmt.Sprintf("The value was assigned to the pattern \"%s\"", confIdentifier))
+				le.Log(ale.Verbose, fmt.Sprintf("The cli value was assigned to the pattern \"%s\"", confIdentifier))
 				break
 			}
 		}
 
-		pattern.Sequences[indexOfSequence] = sequence
-		//fmt.Printf("\n\tEND\n\t\tKey: %s \n\t\tValue: %s\n\t\tName: %s\n=================\n", key, seq.Value, seq.Name)
+		if matchFound {
+			pattern.Sequences[indexOfSequence] = sequence
+			break
+		}
+
+		// Check ENV Match (ENVCAN HIT)
+		for indexOfFlag := 0; indexOfFlag < len(sequence.ENVVars); indexOfFlag++ {
+			seqENVFlag := sequence.ENVVars[indexOfFlag]
+			if confIdentifier == seqENVFlag || confIdentifier == indexOfSequence {
+				le.Log(ale.Verbose, fmt.Sprintf("A env pattern was located \"%s\"", confIdentifier))
+				sequence.Value = confValue
+				matchFound = true
+				le.Log(ale.Verbose, fmt.Sprintf("The env value was assigned to the pattern \"%s\"", confIdentifier))
+				break
+			}
+		}
+
+		if matchFound {
+			pattern.Sequences[indexOfSequence] = sequence
+			break
+		}
 	}
 
 	if matchFound {
