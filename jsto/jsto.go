@@ -7,7 +7,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/seanmmitchell/ale"
+	"github.com/seanmmitchell/ale/v2"
 	"github.com/seanmmitchell/transporter"
 )
 

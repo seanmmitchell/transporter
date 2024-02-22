@@ -6,8 +6,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/seanmmitchell/ale"
-	"github.com/seanmmitchell/ale/pconsole"
+	"github.com/seanmmitchell/ale/v2"
+	"github.com/seanmmitchell/ale/v2/pconsole"
 )
 
 type PatternSequence struct {
@@ -37,15 +37,18 @@ type State struct {
 
 type TransporterOptions struct {
 	//// Logging
-	LogEngine *ale.LogEngine
+	LogEngine            *ale.LogEngine
+	LogEnginePConsoleCTX *pconsole.PConsoleCTX
 
 	//// Loading
 	// Envioronment
 	EnviormentPrefix string
 	// CLI
-	// Config
-	ConfigFilePath   string
-	ConfigFileEngine ConfigFileInterface
+	// ConfigFile (jsto)
+	ConfigFileLogEngine            *ale.LogEngine
+	ConfigFileLogEnginePConsoleCTX *pconsole.PConsoleCTX
+	ConfigFilePath                 string
+	ConfigFileEngine               ConfigFileInterface
 
 	//// Dev / Debug
 	DumpEnvironmentVariables any
@@ -73,11 +76,17 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	state.Active = &atomic.Pointer[Pattern]{}
 	state.Stored = &atomic.Pointer[Pattern]{}
 
-	// Load ALE Log Engine
+	// Load Transporter ALE Log Engine
+	var pCTX *pconsole.PConsoleCTX
+	if tOpts.LogEnginePConsoleCTX == nil {
+		pCTX, _ = pconsole.New(30, 20)
+	} else {
+		pCTX = tOpts.LogEnginePConsoleCTX
+	}
 	var le *ale.LogEngine
 	if tOpts.LogEngine == nil {
 		le = ale.CreateLogEngine("Transporter")
-		le.AddLogPipeline(ale.Debug, pconsole.Log)
+		le.AddLogPipeline(ale.Debug, pCTX.Log)
 	} else {
 		le = tOpts.LogEngine
 	}
@@ -87,18 +96,31 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 
 	// Load Config
 	if tOpts.ConfigFileEngine != nil {
-		jstonLE := le.CreateSubEngine("JSTO")
-		jstonLE.AddLogPipeline(ale.Debug, pconsole.Log)
-		jstonLE.Log(ale.Verbose, "Loading JSON...")
-		jsonData, err := tOpts.ConfigFileEngine.Load(jstonLE)
+		// Load ConfigFile ALE Log Engine
+		var configFilepCTX *pconsole.PConsoleCTX
+		if tOpts.ConfigFileLogEnginePConsoleCTX == nil {
+			configFilepCTX, _ = pconsole.New(30, 20)
+		} else {
+			configFilepCTX = tOpts.LogEnginePConsoleCTX
+		}
+		var configFilele *ale.LogEngine
+		if tOpts.ConfigFileLogEngine == nil {
+			configFilele = ale.CreateLogEngine("Transporter")
+			configFilele.AddLogPipeline(ale.Debug, configFilepCTX.Log)
+		} else {
+			configFilele = tOpts.LogEngine
+		}
+
+		configFilele.Log(ale.Verbose, "Loading JSON...")
+		jsonData, err := tOpts.ConfigFileEngine.Load(configFilele)
 		if err == nil {
-			jstonLE.Log(ale.Verbose, "JSON Loaded.")
+			configFilele.Log(ale.Verbose, "JSON Loaded.")
 
 			for confKey, confData := range jsonData {
 				confVal, ok := confData.(map[string]interface{})
 				if ok {
 					// Check if pattern has persistence.
-					disabledPersitence, ok := confVal["DisabledPersitence"].(bool)
+					disabledPersitence, ok := confVal["DisablePersistence"].(bool)
 					if !ok || disabledPersitence {
 						continue
 					}
@@ -106,16 +128,16 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 					// Get the Pattern
 					value, ok := confVal["Value"].(string)
 					if ok {
-						associatePattern(jstonLE, &pattern, confKey, value)
+						associatePattern(configFilele, &pattern, confKey, value)
 					} else {
-						jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
+						configFilele.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
 					}
 				} else {
-					jstonLE.Log(ale.Warning, fmt.Sprintf("JSON value unable to be parsed. Key: %s", confKey))
+					configFilele.Log(ale.Warning, fmt.Sprintf("JSON value unable to be parsed. Key: %s", confKey))
 				}
 			}
 		} else {
-			jstonLE.Log(ale.Warning, "JSON Failed to Load.")
+			configFilele.Log(ale.Warning, "JSON Failed to Load.")
 		}
 	}
 
