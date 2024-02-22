@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/seanmmitchell/ale"
+	"github.com/seanmmitchell/ale/v2"
 )
 
 func dumpEnvironmentVariables(le *ale.LogEngine) {
