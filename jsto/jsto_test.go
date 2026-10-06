@@ -78,21 +78,36 @@ func TestLoadMissingFileWrapsErrNotExist(t *testing.T) {
 }
 
 func TestLoadCorruptJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "conf.json")
-	writeFile(t, path, `{"token": {"Value": hunter2}`)
-	le, logs := testLogger(t)
+	// encoding/json syntax errors quote the offending byte
+	// ("invalid character 'Z' in literal true"), so 'Z' is a canary for file
+	// content leaking into logs or returned errors.
+	const canary = "'Z'"
+	for name, contents := range map[string]string{
+		"bad literal": `{"token": {"Value": tZ}}`,
+		"bad start":   `Z13371337`,
+		"truncated":   `{"token": {"Value": "Z`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "conf.json")
+			writeFile(t, path, contents)
+			le, logs := testLogger(t)
 
-	_, err := jsto.New(path).Load(le)
-	if err == nil {
-		t.Fatal("Load of corrupt JSON succeeded")
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("Load error %v must not match fs.ErrNotExist", err)
-	}
-	for _, msg := range logs() {
-		if strings.Contains(msg, "hunter2") {
-			t.Fatalf("file contents leaked into log: %q", msg)
-		}
+			_, err := jsto.New(path).Load(le)
+			if err == nil {
+				t.Fatal("Load of corrupt JSON succeeded")
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("Load error %v must not match fs.ErrNotExist", err)
+			}
+			if strings.Contains(err.Error(), canary) {
+				t.Fatalf("file contents leaked into the returned error: %v", err)
+			}
+			for _, msg := range logs() {
+				if strings.Contains(msg, canary) {
+					t.Fatalf("file contents leaked into log: %q", msg)
+				}
+			}
+		})
 	}
 }
 
@@ -219,6 +234,36 @@ func TestSaveFileModeIsPrivate(t *testing.T) {
 		}
 		assertMode(t, path)
 	})
+}
+
+func TestSaveThroughSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks needs extra privileges on windows")
+	}
+	targetDir, linkDir := t.TempDir(), t.TempDir()
+	target := filepath.Join(targetDir, "real.json")
+	link := filepath.Join(linkDir, "conf.json")
+	writeFile(t, target, "{}")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := jsto.New(link).Save(quietLogger(), samplePattern("via-link")); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if info, err := os.Lstat(link); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		t.Fatalf("symlink was replaced (info=%v, err=%v)", info, err)
+	}
+	data, err := jsto.New(target).Load(quietLogger())
+	if err != nil {
+		t.Fatalf("Load target: %v", err)
+	}
+	if got := data["token"].(map[string]interface{})["Value"]; got != "via-link" {
+		t.Fatalf("target Value = %v, want %q", got, "via-link")
+	}
+	assertNoTempFiles(t, targetDir)
+	assertNoTempFiles(t, linkDir)
 }
 
 func TestSaveLeavesNoTempFiles(t *testing.T) {
@@ -357,8 +402,12 @@ func TestConcurrentInstancesSeeWholeFiles(t *testing.T) {
 			defer wg.Done()
 			reader := jsto.New(path)
 			for i := 0; i < 50; i++ {
-				if _, err := reader.Load(quietLogger()); err != nil {
+				data, err := reader.Load(quietLogger())
+				if err != nil {
 					errs <- fmt.Errorf("Load: %w", err)
+				} else if _, ok := data["token"]; !ok {
+					// An empty (truncated) file loads as {} without error.
+					errs <- fmt.Errorf("Load saw a file without %q: %v", "token", data)
 				}
 			}
 		}()

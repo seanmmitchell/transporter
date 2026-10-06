@@ -53,7 +53,7 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 		if errors.Is(err, fs.ErrNotExist) {
 			le.Log(ale.Info, fmt.Sprintf("JSON File %q does not exist.", path))
 		} else {
-			le.Log(ale.Error, "\t==> Failed to read JSON file. Error: "+err.Error())
+			le.Log(ale.Error, fmt.Sprintf("\t==> Failed to read JSON file. Error: %q", err))
 		}
 		return nil, fmt.Errorf("jsto: reading %q: %w", path, err)
 	}
@@ -68,10 +68,8 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 	var jsonData map[string]interface{}
 	err = json.Unmarshal(allBytes, &jsonData)
 	if err != nil {
-		// Decoder errors can quote fragments of the file, so they are returned
-		// to the caller but not logged.
 		le.Log(ale.Error, fmt.Sprintf("\t==> Failed to unmarshal JSON file %q.", path))
-		return nil, fmt.Errorf("jsto: parsing %q: %w", path, err)
+		return nil, fmt.Errorf("jsto: parsing %q: %s", path, describeJSONError(err))
 	}
 	if jsonData == nil {
 		// The file held a JSON null.
@@ -110,10 +108,15 @@ func (conf *JSONConfig) Save(le *ale.LogEngine, pattern *transporter.Pattern) er
 	}
 	le.Log(ale.Verbose, "Pattern Marshaled.")
 
+	// Write through a symlink so the link itself survives the rename.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+
 	le.Log(ale.Verbose, "Writing JSON File...")
 	err = writeFileAtomic(path, data)
 	if err != nil {
-		le.Log(ale.Error, "\t==> Failed to write JSON file. Error: "+err.Error())
+		le.Log(ale.Error, fmt.Sprintf("\t==> Failed to write JSON file. Error: %q", err))
 		return err
 	}
 
@@ -136,9 +139,7 @@ func writeFileAtomic(path string, data []byte) (err error) {
 		}
 	}()
 
-	if err = f.Chmod(0o600); err != nil {
-		return fmt.Errorf("jsto: setting permissions on %q: %w", tmpPath, err)
-	}
+	// os.CreateTemp already creates the file with mode 0600.
 	if _, err = f.Write(data); err != nil {
 		return fmt.Errorf("jsto: writing %q: %w", tmpPath, err)
 	}
@@ -152,6 +153,20 @@ func writeFileAtomic(path string, data []byte) (err error) {
 		return fmt.Errorf("jsto: replacing %q: %w", path, err)
 	}
 	return nil
+}
+
+// describeJSONError summarizes a decode failure without quoting file content,
+// which encoding/json errors do (e.g. "invalid character 'x' in literal true").
+func describeJSONError(err error) string {
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Sprintf("invalid JSON at byte offset %d", syntaxErr.Offset)
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return "top-level JSON value must be an object"
+	}
+	return "invalid JSON"
 }
 
 // logEngineOrDiscard substitutes a pipeline-less engine for a nil one so that
