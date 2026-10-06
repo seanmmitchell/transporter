@@ -3,7 +3,11 @@ package transporter
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -34,9 +38,11 @@ type Pattern struct {
 }
 
 type State struct {
+	// active is replaced, never modified, once published.
 	active atomic.Pointer[Pattern]
 
 	logEngine          *ale.LogEngine
+	configLogEngine    *ale.LogEngine
 	transporterOptions TransporterOptions
 }
 
@@ -73,68 +79,70 @@ const DefaultEnvironmentPrefix = "T_"
 
 const CONF_DisablePersistence_Phrase = "no persistence"
 
+// Energize fills a copy of pattern from the config file, the environment and
+// the CLI, in that order, with later sources overriding earlier ones.
+// Values are never logged.
 func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
-	// Permitted Pattern Names: a-zA-Z0-9.-_
-	// Pattern Map
+	// Work on a copy so the caller's pattern is never mutated.
+	pattern = clonePattern(pattern)
+
+	if tOpts.EnvironmentPrefix == "" {
+		tOpts.EnvironmentPrefix = DefaultEnvironmentPrefix
+	}
 	state := &State{transporterOptions: tOpts}
 
 	// Load Transporter ALE Log Engine
-	var pCTX *pconsole.PConsoleCTX
-	if tOpts.LogEnginePConsoleCTX == nil {
-		pCTX, _ = pconsole.New(30, 20)
-	} else {
-		pCTX = tOpts.LogEnginePConsoleCTX
-	}
-	var le *ale.LogEngine
-	if tOpts.LogEngine == nil {
+	le := tOpts.LogEngine
+	if le == nil {
+		pCTX := tOpts.LogEnginePConsoleCTX
+		if pCTX == nil {
+			var err error
+			pCTX, err = pconsole.New(30, 20)
+			if err != nil {
+				return nil, err
+			}
+		}
 		le = ale.CreateLogEngine("Transporter")
-		le.AddLogPipeline(ale.Debug, pCTX.Log)
-	} else {
-		le = tOpts.LogEngine
+		le.AddLogPipeline(ale.Warning, pCTX.Log)
 	}
 	state.logEngine = le
 
+	// Load ConfigFile ALE Log Engine
+	configLE := le
+	if tOpts.ConfigFileLogEngine != nil {
+		configLE = tOpts.ConfigFileLogEngine
+	}
+	state.configLogEngine = configLE
+
 	le.Log(ale.Info, "Energizing...")
 
-	// Load Config
+	// Index identifiers per source; each must belong to a single sequence.
+	cliIndex, err := buildIndex(pattern, "CLI flag", func(seq PatternSequence) []string { return seq.CLIFlags })
+	if err != nil {
+		return nil, err
+	}
+	envIndex, err := buildIndex(pattern, "environment variable", func(seq PatternSequence) []string { return seq.ENVVars })
+	if err != nil {
+		return nil, err
+	}
+
+	// Load Config (matches sequence keys only)
 	if tOpts.ConfigFileEngine != nil {
-		// Load ConfigFile ALE Log Engine
-		configFilele := le
-		if tOpts.ConfigFileLogEngine != nil {
-			configFilele = tOpts.ConfigFileLogEngine
-		}
-
-		configFilele.Log(ale.Verbose, "Loading JSON...")
-		jsonData, err := tOpts.ConfigFileEngine.Load(configFilele)
-		if err == nil {
-			configFilele.Log(ale.Verbose, "JSON Loaded.")
-
-			for confKey, confData := range jsonData {
-				confVal, ok := confData.(map[string]interface{})
-				if ok {
-					// Check if pattern has persistence.
-					disabledPersitence, ok := confVal["DisablePersistence"].(bool)
-					if !ok || disabledPersitence {
-						continue
-					}
-
-					// Get the Pattern
-					value, ok := confVal["Value"].(string)
-					if ok {
-						associatePattern(configFilele, &pattern, confKey, value)
-					} else {
-						configFilele.Log(ale.Warning, fmt.Sprintf("JSON value not found. Key: %s", confKey))
-					}
-				} else {
-					configFilele.Log(ale.Warning, fmt.Sprintf("JSON value unable to be parsed. Key: %s", confKey))
-				}
-			}
-		} else {
-			configFilele.Log(ale.Warning, "JSON Failed to Load.")
+		configLE.Log(ale.Verbose, "Loading config file...")
+		confData, err := tOpts.ConfigFileEngine.Load(configLE)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			configLE.Log(ale.Info, "Config file does not exist, skipping.")
+		case err != nil:
+			// Fail rather than let a later Materialize overwrite the file.
+			return nil, fmt.Errorf("transporter: loading config file: %w", err)
+		default:
+			loadConfig(configLE, &pattern, confData)
+			configLE.Log(ale.Verbose, "Config file loaded.")
 		}
 	}
 
-	// Load Enviorment Args
+	// Load Environment Variables (matches envIndex only)
 	environ := tOpts.Environ
 	if environ == nil {
 		environ = os.Environ()
@@ -142,24 +150,22 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	if tOpts.DumpEnvironmentVariables {
 		dumpEnvironmentVariables(le, environ, tOpts.EnvironmentPrefix)
 	}
-	for _, ENVArg := range environ {
-		if !strings.HasPrefix(ENVArg, tOpts.EnvironmentPrefix) {
+	for _, kv := range environ {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, tOpts.EnvironmentPrefix) {
 			continue
 		}
 
-		parts := strings.Split(ENVArg, "=")
-		if len(parts) == 2 {
-			argName := (parts[0])[len(tOpts.EnvironmentPrefix):]
-			argValue := parts[1]
-			le.Log(ale.Debug, fmt.Sprintf("New Explicit ENV Arg Found >\n\t> Flag: %s\n\t> Value: %s", argName, argValue))
-
-			associatePattern(le, &pattern, argName, argValue)
-		} else {
-			le.Log(ale.Error, "Invalid ENV Argument, skipping.")
+		key, ok := envIndex[strings.TrimPrefix(name, tOpts.EnvironmentPrefix)]
+		if !ok {
+			le.Log(ale.Warning, fmt.Sprintf("Environment variable %q does not match any pattern, skipping.", name))
+			continue
 		}
+		setValue(&pattern, key, value)
+		le.Log(ale.Verbose, fmt.Sprintf("Environment variable %q assigned to key %q.", name, key))
 	}
 
-	// Load CLI Arg
+	// Load CLI Args (matches cliIndex only)
 	args := tOpts.Args
 	if args == nil && len(os.Args) > 1 {
 		args = os.Args[1:]
@@ -167,37 +173,53 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	if tOpts.DumpCLIArguments {
 		dumpCLIVariables(le, args)
 	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
 
-	for indexOfCLIArgs := 0; indexOfCLIArgs < len(args); indexOfCLIArgs++ {
-		arg := args[indexOfCLIArgs]
-
-		var argName string
-		var argValue string
-		// Try to detect a flag so we can associate the input with a value
-		if len(arg) > 1 && arg[:1] == "-" {
-			argName = arg[2:]
-		} else if len(arg) > 2 && arg[:2] == "--" {
-			argName = arg[3:]
-		} else {
-			// Catch any unexpected input. We should be recieving a flag before a value.
-			le.Log(ale.Warning, "Skipping an invalid CLI argument. Argument \""+arg+"\"")
+		// Accept "--name", "-name" and "--name=value"; a lone "-" is positional.
+		var name string
+		switch {
+		case strings.HasPrefix(arg, "--"):
+			name = arg[2:]
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			name = arg[1:]
+		default:
+			le.Log(ale.Warning, fmt.Sprintf("Skipping positional CLI argument at index %d.", i))
 			continue
 		}
+		name, value, hasValue := strings.Cut(name, "=")
 
-		// Explicit Definition
-		if len(args) > indexOfCLIArgs+1 {
-			argValue = args[indexOfCLIArgs+1]
-		} else {
-			le.Log(ale.Warning, fmt.Sprintf("Failed to seek value for arg \"%s\"", argName))
+		key, ok := cliIndex[name]
+		if !ok {
+			// Unknown flags do not consume the next argument.
+			le.Log(ale.Warning, fmt.Sprintf("Unknown CLI flag %q, skipping.", name))
 			continue
 		}
-		//le.Log(ale.Debug, fmt.Sprintf("New Explicit CLI Arg Found >\n\t> Flag: %s\n\t> Value: %s", argName, argValue))
-
-		// Fetch the Pattern
-		matchFound := associatePattern(le, &pattern, argName, argValue)
-		if matchFound {
-			indexOfCLIArgs = indexOfCLIArgs + 1
+		if !hasValue {
+			if i+1 >= len(args) {
+				le.Log(ale.Warning, fmt.Sprintf("CLI flag %q is missing a value, skipping.", name))
+				continue
+			}
+			// The next argument is the value even if it starts with "-".
+			i++
+			value = args[i]
 		}
+		setValue(&pattern, key, value)
+		le.Log(ale.Verbose, fmt.Sprintf("CLI flag %q assigned to key %q.", name, key))
+	}
+
+	// Check Required
+	var missing []string
+	for _, key := range sortedKeys(pattern.Sequences) {
+		if seq := pattern.Sequences[key]; seq.Required && seq.Value == "" {
+			missing = append(missing, strconv.Quote(key))
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("%w: %s", ErrRequiredMissing, strings.Join(missing, ", "))
 	}
 
 	le.Log(ale.Info, "Energized!")
@@ -206,113 +228,149 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	return state, nil
 }
 
+// Materialize saves the active pattern through the config file engine.
+// DisablePersistence values are replaced by CONF_DisablePersistence_Phrase in
+// the saved copy only.
 func (state *State) Materialize() error {
-	// Filter sequences to remove anything without Persistence.
-	var oldPattern Pattern = (*state.active.Load())
+	if state.transporterOptions.ConfigFileEngine == nil {
+		return ErrNoConfigFileEngine
+	}
 
-	for key, pattern := range oldPattern.Sequences {
-		if pattern.DisablePersistence {
-			pattern.Value = CONF_DisablePersistence_Phrase
-			pattern.Value = CONF_DisablePersistence_Phrase
-			oldPattern.Sequences[key] = pattern
+	snapshot := clonePattern(*state.active.Load())
+	for key, seq := range snapshot.Sequences {
+		if seq.DisablePersistence {
+			seq.Value = CONF_DisablePersistence_Phrase
+			snapshot.Sequences[key] = seq
 		}
 	}
 
-	state.transporterOptions.ConfigFileEngine.Save(state.logEngine, state.active.Swap(&oldPattern))
+	if err := state.transporterOptions.ConfigFileEngine.Save(state.configLogEngine, &snapshot); err != nil {
+		return fmt.Errorf("transporter: saving config file: %w", err)
+	}
 	return nil
 }
 
 func (state *State) Get(key string) (string, error) {
-	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Getting value for key \"%s\"...", key))
-	pat := state.active.Load()
+	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Getting value for key %q...", key))
 
-	value, ok := pat.Sequences[key]
+	seq, ok := state.active.Load().Sequences[key]
 	if !ok {
-		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key \"%s\" does not exist.", key))
+		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key %q does not exist.", key))
 		return "", fmt.Errorf("%w: %q", ErrKeyNotFound, key)
 	}
 
-	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Retrieved value for key \"%s\".", key))
-	return value.Value, nil
+	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Retrieved value for key %q.", key))
+	return seq.Value, nil
 }
 
 func (state *State) Set(key string, value string) error {
-	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Setting a new value for key \"%s\"...", key))
-	pat := state.active.Load()
+	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Setting a new value for key %q...", key))
 
-	existingValue, ok := pat.Sequences[key]
-	if !ok {
-		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key \"%s\" does not exist.", key))
-		return fmt.Errorf("%w: %q", ErrKeyNotFound, key)
+	// Copy-on-write: published patterns are shared with readers, so publish a
+	// modified copy and retry if another Set won the race.
+	for {
+		old := state.active.Load()
+		if _, ok := old.Sequences[key]; !ok {
+			state.logEngine.Log(ale.Warning, fmt.Sprintf("Key %q does not exist.", key))
+			return fmt.Errorf("%w: %q", ErrKeyNotFound, key)
+		}
+
+		next := clonePattern(*old)
+		setValue(&next, key, value)
+		if state.active.CompareAndSwap(old, &next) {
+			break
+		}
 	}
 
-	existingValue.Value = value
-
-	pat.Sequences[key] = existingValue
-
-	state.logEngine.Log(ale.Verbose, fmt.Sprintf("New value set for key \"%s\".", key))
+	state.logEngine.Log(ale.Verbose, fmt.Sprintf("New value set for key %q.", key))
 	return nil
 }
 
-func associatePattern(le *ale.LogEngine, pattern *Pattern, confIdentifier string, confValue string) bool {
-	le.Log(ale.Debug, "Searching for Pattern...")
-	matchFound := false
-
-	// Check Each Sequence
-	for indexOfSequence, sequence := range pattern.Sequences {
-		// Check Identifier Match (JSON, ENV, CLI CAN HIT)
-		if indexOfSequence == confIdentifier {
-			le.Log(ale.Verbose, fmt.Sprintf("A config identifier pattern was located \"%s\"", confIdentifier))
-			sequence.Value = confValue
-			matchFound = true
-			le.Log(ale.Verbose, fmt.Sprintf("The config identifier value was assigned to the pattern \"%s\"", confIdentifier))
+// loadConfig assigns config file values to sequences with matching keys.
+func loadConfig(le *ale.LogEngine, pattern *Pattern, confData map[string]interface{}) {
+	for _, confKey := range sortedKeys(confData) {
+		seq, ok := pattern.Sequences[confKey]
+		if !ok {
+			le.Log(ale.Warning, fmt.Sprintf("Config file key %q does not match any pattern, skipping.", confKey))
+			continue
+		}
+		confVal, ok := confData[confKey].(map[string]interface{})
+		if !ok {
+			le.Log(ale.Warning, fmt.Sprintf("Config file entry %q is not an object, skipping.", confKey))
+			continue
 		}
 
-		if matchFound {
-			pattern.Sequences[indexOfSequence] = sequence
-			break
+		// Skip non-persistent sequences; a missing or non-bool file flag counts as false.
+		fileDisabled, _ := confVal["DisablePersistence"].(bool)
+		if seq.DisablePersistence || fileDisabled {
+			continue
 		}
 
-		// Check CLI Match (ENV, CLI CAN HIT)
-		for indexOfFlag := 0; indexOfFlag < len(sequence.CLIFlags); indexOfFlag++ {
-			seqCLIFlag := sequence.CLIFlags[indexOfFlag]
-			if confIdentifier == seqCLIFlag || confIdentifier == indexOfSequence {
-				le.Log(ale.Verbose, fmt.Sprintf("A cli pattern was located \"%s\"", confIdentifier))
-				sequence.Value = confValue
-				matchFound = true
-				le.Log(ale.Verbose, fmt.Sprintf("The cli value was assigned to the pattern \"%s\"", confIdentifier))
-				break
-			}
+		value, ok := confVal["Value"].(string)
+		if !ok {
+			le.Log(ale.Warning, fmt.Sprintf("Config file entry %q has no string value, skipping.", confKey))
+			continue
 		}
+		seq.Value = value
+		pattern.Sequences[confKey] = seq
+	}
+}
 
-		if matchFound {
-			pattern.Sequences[indexOfSequence] = sequence
-			break
+// buildIndex maps every sequence key and every identifier returned by ids to
+// its sequence key. An identifier claimed by two sequences is an error.
+func buildIndex(pattern Pattern, kind string, ids func(PatternSequence) []string) (map[string]string, error) {
+	index := make(map[string]string)
+	claim := func(id string, key string) error {
+		if id == "" {
+			return nil
 		}
-
-		// Check ENV Match (ENVCAN HIT)
-		for indexOfFlag := 0; indexOfFlag < len(sequence.ENVVars); indexOfFlag++ {
-			seqENVFlag := sequence.ENVVars[indexOfFlag]
-			if confIdentifier == seqENVFlag || confIdentifier == indexOfSequence {
-				le.Log(ale.Verbose, fmt.Sprintf("A env pattern was located \"%s\"", confIdentifier))
-				sequence.Value = confValue
-				matchFound = true
-				le.Log(ale.Verbose, fmt.Sprintf("The env value was assigned to the pattern \"%s\"", confIdentifier))
-				break
-			}
+		if owner, ok := index[id]; ok && owner != key {
+			return fmt.Errorf("%w: %s %q is used by both %q and %q", ErrDuplicateIdentifier, kind, id, owner, key)
 		}
-
-		if matchFound {
-			pattern.Sequences[indexOfSequence] = sequence
-			break
-		}
+		index[id] = key
+		return nil
 	}
 
-	if matchFound {
-		le.Log(ale.Debug, "Pattern Found.")
-		return true
-	} else {
-		le.Log(ale.Warning, fmt.Sprintf("No Pattern was Located for \"%s\"", confIdentifier))
-		return false
+	keys := sortedKeys(pattern.Sequences)
+	for _, key := range keys {
+		if err := claim(key, key); err != nil {
+			return nil, err
+		}
 	}
+	for _, key := range keys {
+		for _, id := range ids(pattern.Sequences[key]) {
+			if err := claim(id, key); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return index, nil
+}
+
+// setValue assigns value to the sequence at key, which must exist.
+func setValue(pattern *Pattern, key string, value string) {
+	seq := pattern.Sequences[key]
+	seq.Value = value
+	pattern.Sequences[key] = seq
+}
+
+// clonePattern returns a deep copy of p; a nil Sequences map becomes empty.
+func clonePattern(p Pattern) Pattern {
+	c := Pattern{Sequences: make(map[string]PatternSequence, len(p.Sequences))}
+	for key, seq := range p.Sequences {
+		seq.CLIFlags = slices.Clone(seq.CLIFlags)
+		seq.ENVVars = slices.Clone(seq.ENVVars)
+		c.Sequences[key] = seq
+	}
+	return c
+}
+
+// sortedKeys returns the keys of m in ascending order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
