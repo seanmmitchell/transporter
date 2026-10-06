@@ -74,8 +74,8 @@ func main() {
 | PatternSequence field | Meaning                                                                                       |
 | --------------------- | --------------------------------------------------------------------------------------------- |
 | `Value`               | Default before loading; current value after.                                                  |
-| `CLIFlags`            | Flag names without dashes. The sequence key also works as a flag.                             |
-| `ENVVars`             | Variable names without the prefix. The sequence key also works (`APP_port`).                  |
+| `CLIFlags`            | Flag names without dashes or `=` (else `ErrInvalidIdentifier`). The sequence key also works as a flag. |
+| `ENVVars`             | Variable names without the prefix or `=`. The sequence key also works (`APP_port`).           |
 | `Required`            | `Energize` returns `ErrRequiredMissing` if the sequence still has no value after loading.      |
 | `DisablePersistence`  | `Materialize` saves `"no persistence"` instead of the value; that config entry is never loaded. |
 | `Name`, `Description`, `Example` | Documentation only (`Example` is not persisted).                                    |
@@ -84,7 +84,7 @@ func main() {
 | Requirement Type     | Details                                                                                                                                       |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Precedence           | Default `Value` < config file < environment < CLI. A later source wins.                                                                       |
-| CLI forms            | `--name value`, `--name=value`, `-name value`. `--` ends parsing. `argv[0]` is never parsed. Unknown flags are logged as a Warning and skipped. |
+| CLI forms            | `--name value`, `--name=value`, `-name value`. A value may start with `-` (`--offset -5`), but `--` is never a value: it ends parsing. `argv[0]` is never parsed. Unknown flags are skipped with a Warning that names only their position (the token may be a value). |
 | Environment Prefix   | Only variables starting with the prefix (default `"T_"`) are read. The rest of the name is matched. Values may contain `=`.                    |
 | Identifiers          | Sequence keys, CLI flags and ENV var names must be unique within their source. A duplicate makes `Energize` return `ErrDuplicateIdentifier`. |
 | Config file          | Entries are matched by sequence key. A missing file is fine (it is created by `Materialize`).                                                 |
@@ -96,11 +96,11 @@ func main() {
 | LogEnginePConsoleCTX     | new `pconsole.PConsoleCTX`         | Only used by the default LogEngine. In ALE, the pconsole output engine needs a CTX for write locking with front-end facing threads.                                  |
 | ConfigFileLogEngine      | LogEngine                          | Log engine passed to the ConfigFileEngine (jsto).                                                                                                                   |
 | EnvironmentPrefix        | `"T_"`                             | An empty prefix is reset to the default.                                                                                                                            |
-| Args                     | `os.Args[1:]` (when nil)           | CLI arguments to parse. Handy for tests.                                                                                                                            |
-| Environ                  | `os.Environ()` (when nil)          | `KEY=value` entries to read. Handy for tests.                                                                                                                       |
+| Args                     | `os.Args[1:]` (when nil)           | CLI arguments to parse. Only `nil` means "use the process"; pass `[]string{}` for none (a filtered slice that ends up nil falls back to `os.Args`).             |
+| Environ                  | `os.Environ()` (when nil)          | `KEY=value` entries to read. As with Args, pass `[]string{}` for none.                                                                                              |
 | ConfigFileEngine         | nil                                | By default, Transporter is simply a CLI & ENV argument aggregator and state management tool. Set it (e.g. `jsto.New("config.json")`) to get a JSON configuration file. |
-| DumpEnvironmentVariables | false                              | Logs the names of prefixed variables at Debug level. Values are redacted.                                                                                          |
-| DumpCLIArguments         | false                              | Logs the CLI arguments at Debug level. Values are redacted.                                                                                                        |
+| DumpEnvironmentVariables | false                              | Logs the names of prefixed variables at Debug level. Values are redacted. Needs a LogEngine with a Debug pipeline; the default engine hides it.                     |
+| DumpCLIArguments         | false                              | Logs the CLI arguments at Debug level. Values are redacted. Needs a LogEngine with a Debug pipeline; the default engine hides it.                                   |
 
 ## Errors
 Errors are wrapped with context, so check them with `errors.Is`.
@@ -110,14 +110,16 @@ Errors are wrapped with context, so check them with `errors.Is`.
 | `ErrKeyNotFound`         | Get, Set     | The key is not in the pattern.                                             |
 | `ErrNoConfigFileEngine`  | Materialize  | No ConfigFileEngine was configured.                                        |
 | `ErrDuplicateIdentifier` | Energize     | A key/flag/ENV name maps to more than one sequence in the same source.     |
+| `ErrInvalidIdentifier`   | Energize     | A CLI flag starts with `-` or contains `=`, or an ENV name contains `=`.   |
 | `ErrRequiredMissing`     | Energize     | A `Required` sequence has no value after loading.                          |
 
-`Energize` also fails when the config file exists but cannot be read or parsed. A missing file is not an error. A custom `ConfigFileInterface` must return an error wrapping `fs.ErrNotExist` for a missing file.
+`Energize` also fails when the config file exists but cannot be read or parsed. A missing file is not an error. A custom `ConfigFileInterface` must return an error wrapping `fs.ErrNotExist` for a missing file. Always obtain a `State` from `Energize`; a zero `State` is not usable.
 
 ## Security Notes
 - Configuration values are never logged. The Debug dumps print names only, with values shown as `<redacted>`.
 - `Materialize` persists every value, including ones that came from the environment or CLI. Mark secrets with `DisablePersistence`: they are saved as `"no persistence"`, and the in-memory value stays usable.
-- jsto writes the config file atomically with `0600` permissions.
+- jsto writes the config file atomically with `0600` permissions: a temp file in the same directory is renamed over it, so that directory must be writable. A symlinked config path is written through (the link is kept); the file's owner becomes the writing user. On Windows `0600` does not restrict readers, so keep the file in a private directory.
+- jsto parse errors report only a byte offset, never file content.
 - `jsto.Save` rewrites the whole file with only the pattern's keys. Other keys in the file are dropped.
 
 ## Logging Interoperability
@@ -146,6 +148,10 @@ This is something that could be modified in the future for larger support if nee
 | `&jsto.JSONConfig{FileLock: &sync.Mutex{}, FilePath: p}`        | `jsto.New(p)`                                                                            |
 | CLI parsing included `argv[0]`                                  | `os.Args[1:]`, or the new `Args` option.                                                 |
 | Read `os.Environ()` directly                                    | The new `Environ` option (defaults to `os.Environ()`).                                   |
+| Any source could match any identifier (an ENV name could hit a `CLIFlags` entry, a CLI flag an `ENVVars` entry, a config key either) | Each source matches only its own names: CLI → key + `CLIFlags`, ENV → key + `ENVVars`, config file → key. Add the missing `ENVVars`/`CLIFlags` entries. |
+| `EnviormentPrefix: ""` read every unprefixed variable           | An empty prefix means `"T_"`; unprefixed variables (e.g. `PORT`) are never read.         |
+| Config entries without a `DisablePersistence` field were skipped | They load (a missing field counts as `false`).                                           |
+| Unknown flags and positional args were logged with their text   | Unknown flags are logged by position at Warning; positional args only at Verbose.        |
 | Default log level Debug                                         | Warning.                                                                                 |
 | `Energize` always returned a nil error                          | Returns errors (unreadable/corrupt config, duplicates, missing required values).         |
 | `Required` was ignored                                          | Enforced with `ErrRequiredMissing`.                                                      |
