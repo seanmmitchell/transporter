@@ -30,11 +30,12 @@ func dumpEnvironmentVariables(le *ale.LogEngine, environ []string, prefix string
 
 // dumpCLIVariables logs, at Debug level, the shape of the CLI arguments with
 // every value redacted:
-//   - flag tokens (leading "-") are printed as-is, except that the value of
-//     "--name=value" / "-name=value" is redacted;
+//   - flag tokens (leading "-", but not a lone "-") are printed as-is, except
+//     that the value of "--name=value" / "-name=value" is redacted;
 //   - every other token is redacted, as is the token right after a bare flag
 //     (it is that flag's value, even when it starts with "-");
-//   - "--" is always printed as-is, and everything after it is redacted.
+//   - "--" is always printed as-is (it is never a flag's value), and
+//     everything after it is redacted.
 //
 // Printed names are %q-quoted to prevent log injection.
 func dumpCLIVariables(le *ale.LogEngine, args []string) {
@@ -52,7 +53,7 @@ func dumpCLIVariables(le *ale.LogEngine, args []string) {
 		case expectValue:
 			b.WriteString("\n\t\t==> " + redacted)
 			expectValue = false
-		case strings.HasPrefix(arg, "-"):
+		case strings.HasPrefix(arg, "-") && arg != "-":
 			if name, _, hasValue := strings.Cut(arg, "="); hasValue {
 				fmt.Fprintf(&b, "\n\t\t==> %q=%s", name, redacted)
 			} else {

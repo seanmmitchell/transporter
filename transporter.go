@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/seanmmitchell/ale/v2"
@@ -19,6 +20,7 @@ var (
 	ErrKeyNotFound         = errors.New("transporter: key does not exist")
 	ErrNoConfigFileEngine  = errors.New("transporter: no config file engine configured")
 	ErrDuplicateIdentifier = errors.New("transporter: duplicate key/flag/env identifier")
+	ErrInvalidIdentifier   = errors.New("transporter: invalid flag/env identifier")
 	ErrRequiredMissing     = errors.New("transporter: required value missing")
 )
 
@@ -40,6 +42,8 @@ type Pattern struct {
 type State struct {
 	// active is replaced, never modified, once published.
 	active atomic.Pointer[Pattern]
+	// saveMu orders Materialize calls so an older snapshot never overwrites a newer one.
+	saveMu sync.Mutex
 
 	logEngine          *ale.LogEngine
 	configLogEngine    *ale.LogEngine
@@ -117,11 +121,12 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	le.Log(ale.Info, "Energizing...")
 
 	// Index identifiers per source; each must belong to a single sequence.
-	cliIndex, err := buildIndex(pattern, "CLI flag", func(seq PatternSequence) []string { return seq.CLIFlags })
+	// Flag names are given without dashes; neither kind of name may contain "=".
+	cliIndex, err := buildIndex(pattern, "CLI flag", "-", func(seq PatternSequence) []string { return seq.CLIFlags })
 	if err != nil {
 		return nil, err
 	}
-	envIndex, err := buildIndex(pattern, "environment variable", func(seq PatternSequence) []string { return seq.ENVVars })
+	envIndex, err := buildIndex(pattern, "environment variable", "", func(seq PatternSequence) []string { return seq.ENVVars })
 	if err != nil {
 		return nil, err
 	}
@@ -187,19 +192,20 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 		case strings.HasPrefix(arg, "-") && arg != "-":
 			name = arg[1:]
 		default:
-			le.Log(ale.Warning, fmt.Sprintf("Skipping positional CLI argument at index %d.", i))
+			le.Log(ale.Verbose, fmt.Sprintf("Skipping positional CLI argument at index %d.", i))
 			continue
 		}
 		name, value, hasValue := strings.Cut(name, "=")
 
 		key, ok := cliIndex[name]
 		if !ok {
-			// Unknown flags do not consume the next argument.
-			le.Log(ale.Warning, fmt.Sprintf("Unknown CLI flag %q, skipping.", name))
+			// Unknown flags do not consume the next argument, so this token may
+			// really be a value (e.g. "-s3cret"); log its index, never its text.
+			le.Log(ale.Warning, fmt.Sprintf("Unknown CLI flag at index %d, skipping.", i))
 			continue
 		}
 		if !hasValue {
-			if i+1 >= len(args) {
+			if i+1 >= len(args) || args[i+1] == "--" {
 				le.Log(ale.Warning, fmt.Sprintf("CLI flag %q is missing a value, skipping.", name))
 				continue
 			}
@@ -235,6 +241,9 @@ func (state *State) Materialize() error {
 	if state.transporterOptions.ConfigFileEngine == nil {
 		return ErrNoConfigFileEngine
 	}
+
+	state.saveMu.Lock()
+	defer state.saveMu.Unlock()
 
 	snapshot := clonePattern(*state.active.Load())
 	for key, seq := range snapshot.Sequences {
@@ -317,8 +326,10 @@ func loadConfig(le *ale.LogEngine, pattern *Pattern, confData map[string]interfa
 }
 
 // buildIndex maps every sequence key and every identifier returned by ids to
-// its sequence key. An identifier claimed by two sequences is an error.
-func buildIndex(pattern Pattern, kind string, ids func(PatternSequence) []string) (map[string]string, error) {
+// its sequence key. An identifier claimed by two sequences is an error, as is
+// one that could never match: containing "=" or, when badPrefix is set,
+// starting with it.
+func buildIndex(pattern Pattern, kind string, badPrefix string, ids func(PatternSequence) []string) (map[string]string, error) {
 	index := make(map[string]string)
 	claim := func(id string, key string) error {
 		if id == "" {
@@ -339,6 +350,9 @@ func buildIndex(pattern Pattern, kind string, ids func(PatternSequence) []string
 	}
 	for _, key := range keys {
 		for _, id := range ids(pattern.Sequences[key]) {
+			if strings.Contains(id, "=") || (badPrefix != "" && strings.HasPrefix(id, badPrefix)) {
+				return nil, fmt.Errorf("%w: %s %q of %q can never match", ErrInvalidIdentifier, kind, id, key)
+			}
 			if err := claim(id, key); err != nil {
 				return nil, err
 			}

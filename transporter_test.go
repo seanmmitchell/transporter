@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seanmmitchell/ale/v2"
 	"github.com/seanmmitchell/transporter/v2"
@@ -317,8 +319,50 @@ func TestConfigFileLogEngineOnly(t *testing.T) {
 	if stub.loadLE != cfgLE {
 		t.Errorf("Load did not receive ConfigFileLogEngine")
 	}
-	if stub.saveLE == nil {
-		t.Errorf("Save received a nil log engine")
+	if stub.saveLE != cfgLE {
+		t.Errorf("Save did not receive ConfigFileLogEngine")
+	}
+}
+
+// overlapConfig records whether two Saves ever run at the same time.
+type overlapConfig struct {
+	active, overlapped atomic.Int32
+}
+
+func (c *overlapConfig) Load(*ale.LogEngine) (map[string]interface{}, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (c *overlapConfig) Save(*ale.LogEngine, *transporter.Pattern) error {
+	if c.active.Add(1) > 1 {
+		c.overlapped.Store(1)
+	}
+	time.Sleep(time.Millisecond)
+	c.active.Add(-1)
+	return nil
+}
+
+func TestMaterializeSerialized(t *testing.T) {
+	cfg := &overlapConfig{}
+	o, _ := baseOptions()
+	o.ConfigFileEngine = cfg
+	s := energize(t, newPattern(), o)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				if err := s.Materialize(); err != nil {
+					t.Errorf("Materialize: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if cfg.overlapped.Load() != 0 {
+		t.Errorf("concurrent Materialize calls overlapped in Save; an older snapshot could overwrite a newer one")
 	}
 }
 
@@ -385,6 +429,9 @@ func TestCLIForms(t *testing.T) {
 		{"--flag=value", []string{"--f=v"}, map[string]string{keyFirst: "v"}},
 		{"alias and sequence key", []string{"--fn", "a", "--user-age", "30"}, map[string]string{keyFirst: "a", keyAge: "30"}},
 		{"-- ends parsing", []string{"--f", "x", "--", "--f", "v", "--age", "9"}, map[string]string{keyFirst: "x"}},
+		{"-- is never a flag value", []string{"--age", "--", "--f", "v"}, map[string]string{}},
+		{"value may start with -", []string{"--age", "-5"}, map[string]string{keyAge: "-5"}},
+		{"lone - is positional", []string{"-", "--f", "v"}, map[string]string{keyFirst: "v"}},
 		{"unknown flag does not consume next arg", []string{"--nope", "--f", "v"}, map[string]string{keyFirst: "v"}},
 		{"explicit Args parsed from first element", []string{"--age", "99", "--f", "v"}, map[string]string{keyFirst: "v", keyAge: "99"}},
 	}
@@ -456,6 +503,25 @@ func TestDuplicateIdentifiers(t *testing.T) {
 	}
 }
 
+func TestInvalidIdentifiers(t *testing.T) {
+	type seqs = map[string]transporter.PatternSequence
+	cases := map[string]seqs{
+		"CLI flag with dashes":  {"a": {CLIFlags: []string{"--port"}}},
+		"CLI flag with a dash":  {"a": {CLIFlags: []string{"-p"}}},
+		"CLI flag containing =": {"a": {CLIFlags: []string{"p=1"}}},
+		"ENV var containing =":  {"a": {ENVVars: []string{"P=1"}}},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			o, _ := baseOptions()
+			_, err := transporter.Energize(transporter.Pattern{Sequences: s}, o)
+			if !errors.Is(err, transporter.ErrInvalidIdentifier) {
+				t.Errorf("Energize: err = %v, want ErrInvalidIdentifier", err)
+			}
+		})
+	}
+}
+
 func TestCallerPatternNotMutated(t *testing.T) {
 	p := newPattern()
 	o, _ := baseOptions()
@@ -501,6 +567,21 @@ func TestFileCannotReenableDisabledPersistence(t *testing.T) {
 		keyAge:  map[string]any{"DisablePersistence": false, "Value": "33"}, // control: file was read
 	}}
 	wantAll(t, energize(t, newPattern(), o), map[string]string{keyAge: "33"})
+}
+
+func TestConfigEntrySkipping(t *testing.T) {
+	o, _ := baseOptions()
+	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
+		keyFirst: map[string]any{"DisablePersistence": true, "Value": "file-disabled"}, // file flag alone disables
+		keyAge:   "not an object",
+		"other":  map[string]any{"Value": "unknown key"},
+	}}
+	wantAll(t, energize(t, newPattern(), o), map[string]string{})
+
+	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
+		keyAge: map[string]any{"Value": 33}, // non-string Value
+	}}
+	wantAll(t, energize(t, newPattern(), o), map[string]string{})
 }
 
 func TestRequiredMissing(t *testing.T) {
@@ -552,7 +633,9 @@ func TestSecretsNeverLogged(t *testing.T) {
 	o.DumpEnvironmentVariables = true
 	o.DumpCLIArguments = true
 	o.Environ = []string{"T_LN=" + canary + "-env", "UNRELATED=" + canary + "-unrelated"}
-	o.Args = []string{"--f", canary + "-cli", "--age=" + canary + "-cli-eq"}
+	// "-…-after-unknown" follows an unknown flag, so the parser sees it as
+	// another unknown flag; it is still a value and must not be logged.
+	o.Args = []string{"--f", canary + "-cli", "--age=" + canary + "-cli-eq", "--tokn", "-" + canary + "-after-unknown", canary + "-positional"}
 
 	s := energize(t, newPattern(), o)
 	wantAll(t, s, map[string]string{keyFirst: canary + "-cli", keyLast: canary + "-env", keyAge: canary + "-cli-eq"})
