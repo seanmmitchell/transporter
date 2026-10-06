@@ -1,6 +1,7 @@
 package transporter
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,15 +11,20 @@ import (
 	"github.com/seanmmitchell/ale/v2/pconsole"
 )
 
+var (
+	ErrKeyNotFound         = errors.New("transporter: key does not exist")
+	ErrNoConfigFileEngine  = errors.New("transporter: no config file engine configured")
+	ErrDuplicateIdentifier = errors.New("transporter: duplicate key/flag/env identifier")
+	ErrRequiredMissing     = errors.New("transporter: required value missing")
+)
+
 type PatternSequence struct {
 	Name               string   `json:"Name"`
 	Description        string   `json:"Description"`
 	Example            string   `json:"-"`
 	Required           bool     `json:"Required"`
 	DisablePersistence bool     `json:"DisablePersistence"`
-	ENVCaseSensitive   bool     `json:"-"`
 	ENVVars            []string `json:"-"`
-	CaseSensitiveFlags bool     `json:"-"`
 	CLIFlags           []string `json:"-"`
 	Value              string   `json:"Value"`
 }
@@ -28,8 +34,7 @@ type Pattern struct {
 }
 
 type State struct {
-	Active *atomic.Pointer[Pattern]
-	Stored *atomic.Pointer[Pattern]
+	active atomic.Pointer[Pattern]
 
 	logEngine          *ale.LogEngine
 	transporterOptions TransporterOptions
@@ -37,34 +42,34 @@ type State struct {
 
 type TransporterOptions struct {
 	//// Logging
+	// LogEngine defaults to an engine that emits Warning and above to the console.
 	LogEngine            *ale.LogEngine
 	LogEnginePConsoleCTX *pconsole.PConsoleCTX
 
 	//// Loading
-	// Envioronment
-	EnviormentPrefix string
-	// CLI
-	// ConfigFile (jsto)
-	ConfigFileLogEngine            *ale.LogEngine
-	ConfigFileLogEnginePConsoleCTX *pconsole.PConsoleCTX
-	ConfigFilePath                 string
-	ConfigFileEngine               ConfigFileInterface
+	// Environment: only variables carrying this prefix are read. Defaults to DefaultEnvironmentPrefix.
+	EnvironmentPrefix string
+	// Environ defaults to os.Environ().
+	Environ []string
+	// CLI: Args defaults to os.Args[1:].
+	Args []string
+	// ConfigFile (jsto): ConfigFileLogEngine defaults to the transporter log engine.
+	ConfigFileLogEngine *ale.LogEngine
+	ConfigFileEngine    ConfigFileInterface
 
 	//// Dev / Debug
-	DumpEnvironmentVariables any
-	DumpCLIArguments         any
+	DumpEnvironmentVariables bool
+	DumpCLIArguments         bool
 }
 
+// ConfigFileInterface persists patterns. Load must return an error wrapping
+// fs.ErrNotExist when the backing file does not exist.
 type ConfigFileInterface interface {
 	Load(le *ale.LogEngine) (map[string]interface{}, error)
 	Save(le *ale.LogEngine, pattern *Pattern) error
 }
 
-var defaultTransporterOpts = TransporterOptions{
-	ConfigFileEngine:         nil, // Initialize with nil or assign a pointer to an implementation
-	DumpEnvironmentVariables: false,
-	DumpCLIArguments:         false,
-}
+const DefaultEnvironmentPrefix = "T_"
 
 const CONF_DisablePersistence_Phrase = "no persistence"
 
@@ -72,9 +77,6 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	// Permitted Pattern Names: a-zA-Z0-9.-_
 	// Pattern Map
 	state := &State{transporterOptions: tOpts}
-
-	state.Active = &atomic.Pointer[Pattern]{}
-	state.Stored = &atomic.Pointer[Pattern]{}
 
 	// Load Transporter ALE Log Engine
 	var pCTX *pconsole.PConsoleCTX
@@ -97,18 +99,9 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	// Load Config
 	if tOpts.ConfigFileEngine != nil {
 		// Load ConfigFile ALE Log Engine
-		var configFilepCTX *pconsole.PConsoleCTX
-		if tOpts.ConfigFileLogEnginePConsoleCTX == nil {
-			configFilepCTX, _ = pconsole.New(30, 20)
-		} else {
-			configFilepCTX = tOpts.LogEnginePConsoleCTX
-		}
-		var configFilele *ale.LogEngine
-		if tOpts.ConfigFileLogEngine == nil {
-			configFilele = ale.CreateLogEngine("Transporter")
-			configFilele.AddLogPipeline(ale.Debug, configFilepCTX.Log)
-		} else {
-			configFilele = tOpts.LogEngine
+		configFilele := le
+		if tOpts.ConfigFileLogEngine != nil {
+			configFilele = tOpts.ConfigFileLogEngine
 		}
 
 		configFilele.Log(ale.Verbose, "Loading JSON...")
@@ -142,17 +135,21 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	}
 
 	// Load Enviorment Args
-	if tOpts.DumpEnvironmentVariables == true || (tOpts.DumpEnvironmentVariables == nil && defaultTransporterOpts.DumpEnvironmentVariables == true) {
-		dumpEnvironmentVariables(le)
+	environ := tOpts.Environ
+	if environ == nil {
+		environ = os.Environ()
 	}
-	for _, ENVArg := range os.Environ() {
-		if !strings.HasPrefix(ENVArg, tOpts.EnviormentPrefix) {
+	if tOpts.DumpEnvironmentVariables {
+		dumpEnvironmentVariables(le, environ, tOpts.EnvironmentPrefix)
+	}
+	for _, ENVArg := range environ {
+		if !strings.HasPrefix(ENVArg, tOpts.EnvironmentPrefix) {
 			continue
 		}
 
 		parts := strings.Split(ENVArg, "=")
 		if len(parts) == 2 {
-			argName := (parts[0])[len(tOpts.EnviormentPrefix):]
+			argName := (parts[0])[len(tOpts.EnvironmentPrefix):]
 			argValue := parts[1]
 			le.Log(ale.Debug, fmt.Sprintf("New Explicit ENV Arg Found >\n\t> Flag: %s\n\t> Value: %s", argName, argValue))
 
@@ -163,12 +160,16 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	}
 
 	// Load CLI Arg
-	if tOpts.DumpCLIArguments == true || (tOpts.DumpCLIArguments == nil && defaultTransporterOpts.DumpCLIArguments == true) {
-		dumpCLIVariables(le)
+	args := tOpts.Args
+	if args == nil && len(os.Args) > 1 {
+		args = os.Args[1:]
+	}
+	if tOpts.DumpCLIArguments {
+		dumpCLIVariables(le, args)
 	}
 
-	for indexOfCLIArgs := 0; indexOfCLIArgs < len(os.Args); indexOfCLIArgs++ {
-		arg := os.Args[indexOfCLIArgs]
+	for indexOfCLIArgs := 0; indexOfCLIArgs < len(args); indexOfCLIArgs++ {
+		arg := args[indexOfCLIArgs]
 
 		var argName string
 		var argValue string
@@ -184,8 +185,8 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 		}
 
 		// Explicit Definition
-		if len(os.Args) > indexOfCLIArgs+1 {
-			argValue = os.Args[indexOfCLIArgs+1]
+		if len(args) > indexOfCLIArgs+1 {
+			argValue = args[indexOfCLIArgs+1]
 		} else {
 			le.Log(ale.Warning, fmt.Sprintf("Failed to seek value for arg \"%s\"", argName))
 			continue
@@ -201,13 +202,13 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 
 	le.Log(ale.Info, "Energized!")
 
-	(*state.Active).Store(&pattern)
+	state.active.Store(&pattern)
 	return state, nil
 }
 
 func (state *State) Materialize() error {
 	// Filter sequences to remove anything without Persistence.
-	var oldPattern Pattern = (*state.Active.Load())
+	var oldPattern Pattern = (*state.active.Load())
 
 	for key, pattern := range oldPattern.Sequences {
 		if pattern.DisablePersistence {
@@ -217,22 +218,18 @@ func (state *State) Materialize() error {
 		}
 	}
 
-	state.transporterOptions.ConfigFileEngine.Save(state.logEngine, state.Active.Swap(&oldPattern))
-	return nil
-}
-
-func (state *State) Switch() error {
+	state.transporterOptions.ConfigFileEngine.Save(state.logEngine, state.active.Swap(&oldPattern))
 	return nil
 }
 
 func (state *State) Get(key string) (string, error) {
 	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Getting value for key \"%s\"...", key))
-	pat := state.Active.Load()
+	pat := state.active.Load()
 
 	value, ok := pat.Sequences[key]
 	if !ok {
 		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key \"%s\" does not exist.", key))
-		return "", fmt.Errorf("key does not exist")
+		return "", fmt.Errorf("%w: %q", ErrKeyNotFound, key)
 	}
 
 	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Retrieved value for key \"%s\".", key))
@@ -241,12 +238,12 @@ func (state *State) Get(key string) (string, error) {
 
 func (state *State) Set(key string, value string) error {
 	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Setting a new value for key \"%s\"...", key))
-	pat := state.Active.Load()
+	pat := state.active.Load()
 
 	existingValue, ok := pat.Sequences[key]
 	if !ok {
 		state.logEngine.Log(ale.Warning, fmt.Sprintf("Key \"%s\" does not exist.", key))
-		return fmt.Errorf("key does not exist")
+		return fmt.Errorf("%w: %q", ErrKeyNotFound, key)
 	}
 
 	existingValue.Value = value

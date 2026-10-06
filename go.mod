@@ -1,6 +1,6 @@
-module github.com/seanmmitchell/transporter
+module github.com/seanmmitchell/transporter/v2
 
-go 1.19
+go 1.22
 
 require github.com/seanmmitchell/ale/v2 v2.0.0
 

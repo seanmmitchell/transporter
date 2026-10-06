@@ -8,17 +8,25 @@ import (
 	"sync"
 
 	"github.com/seanmmitchell/ale/v2"
-	"github.com/seanmmitchell/transporter"
+	"github.com/seanmmitchell/transporter/v2"
 )
 
+// JSONConfig stores a pattern as a JSON file. The zero value is usable once
+// FilePath is set; it must not be copied after first use.
 type JSONConfig struct {
-	FileLock *sync.Mutex
 	FilePath string
+
+	mu sync.Mutex
+}
+
+// New returns a JSONConfig backed by the file at path.
+func New(path string) *JSONConfig {
+	return &JSONConfig{FilePath: path}
 }
 
 func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) {
-	conf.FileLock.Lock()
-	defer conf.FileLock.Unlock()
+	conf.mu.Lock()
+	defer conf.mu.Unlock()
 	le.Log(ale.Info, "Loading JSON File...")
 
 	le.Log(ale.Verbose, "Opening JSON File...")
@@ -55,8 +63,8 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 }
 
 func (conf *JSONConfig) Save(le *ale.LogEngine, pattern *transporter.Pattern) error {
-	conf.FileLock.Lock()
-	defer conf.FileLock.Unlock()
+	conf.mu.Lock()
+	defer conf.mu.Unlock()
 	le.Log(ale.Info, "Saving JSON File...")
 
 	data, err := json.MarshalIndent(pattern.Sequences, "", "\t")

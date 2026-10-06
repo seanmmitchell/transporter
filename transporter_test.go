@@ -4,14 +4,13 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/seanmmitchell/ale/v2"
 	"github.com/seanmmitchell/ale/v2/pconsole"
-	"github.com/seanmmitchell/transporter"
-	"github.com/seanmmitchell/transporter/jsto"
+	"github.com/seanmmitchell/transporter/v2"
+	"github.com/seanmmitchell/transporter/v2/jsto"
 
 	"os/exec"
 )
@@ -189,35 +188,34 @@ func createTestState(testID int, le *ale.LogEngine, t *testing.T) *transporter.S
 	tle := le.CreateSubEngine("Test " + strconv.Itoa(testID))
 	tle.AddLogPipeline(ale.Debug, pCTX.Log)
 	pattern, err := transporter.Energize(
-		transporter.Pattern{
-			map[string]transporter.PatternSequence{
-				sampleCLIArgs1[0].patternKey: {
-					Name:        "User's First Name",
-					Description: "A variable for holding the User's First Name.",
-					CLIFlags:    []string{"f", "fn"},
-					ENVVars:     []string{"FN"},
-				},
-				sampleCLIArgs1[1].patternKey: {
-					Name:               "User's Last Name",
-					Description:        "A variable for holding the User's Last Name.",
-					CLIFlags:           []string{"l", "ln"},
-					ENVVars:            []string{"LN"},
-					DisablePersistence: true,
-				},
-				sampleCLIArgs1[2].patternKey: {
-					Name:        "User's Age",
-					Description: "A variable for holding the user's age.",
-					CLIFlags:    []string{"a", "age"},
-					ENVVars:     []string{"AGE"},
-				},
+		transporter.Pattern{Sequences: map[string]transporter.PatternSequence{
+			sampleCLIArgs1[0].patternKey: {
+				Name:        "User's First Name",
+				Description: "A variable for holding the User's First Name.",
+				CLIFlags:    []string{"f", "fn"},
+				ENVVars:     []string{"FN"},
 			},
+			sampleCLIArgs1[1].patternKey: {
+				Name:               "User's Last Name",
+				Description:        "A variable for holding the User's Last Name.",
+				CLIFlags:           []string{"l", "ln"},
+				ENVVars:            []string{"LN"},
+				DisablePersistence: true,
+			},
+			sampleCLIArgs1[2].patternKey: {
+				Name:        "User's Age",
+				Description: "A variable for holding the user's age.",
+				CLIFlags:    []string{"a", "age"},
+				ENVVars:     []string{"AGE"},
+			},
+		},
 		}, transporter.TransporterOptions{
-			EnviormentPrefix:         "T_",
+			EnvironmentPrefix:        "T_",
 			DumpEnvironmentVariables: false,
 			DumpCLIArguments:         false,
 			LogEngine:                tle,
 			LogEnginePConsoleCTX:     pCTX,
-			ConfigFileEngine:         &jsto.JSONConfig{FilePath: estFP, FileLock: &sync.Mutex{}},
+			ConfigFileEngine:         jsto.New(estFP),
 		},
 	)
 
