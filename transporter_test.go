@@ -1,228 +1,635 @@
 package transporter_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"strconv"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/seanmmitchell/ale/v2"
-	"github.com/seanmmitchell/ale/v2/pconsole"
 	"github.com/seanmmitchell/transporter/v2"
 	"github.com/seanmmitchell/transporter/v2/jsto"
-
-	"os/exec"
 )
 
-var testStateCounter int = 0
+// #region Helpers
 
-// Set Static Test Data
-type staticTest struct {
-	patternKey string
-	cliFlag    string
-	cliValue   string
-}
+const (
+	keyFirst = "user-firstName"
+	keyLast  = "user-lastName" // DisablePersistence
+	keyAge   = "user-age"
+)
 
-var sampleCLIArgs1 = []staticTest{
-	{"user-firstName", "f", "sean"},
-	{"user-lastName", "ln", "test"},
-	{"user-age", "age", "21"},
-}
-
-var pCTX *pconsole.PConsoleCTX
-var estFP = "transporter_test-" + strconv.Itoa(0) + ".config.json"
-
-func TestMain(t *testing.T) {
-	le := ale.CreateLogEngine("Transporter Testing")
-	pCTX, _ = pconsole.New(40, 20)
-	le.AddLogPipeline(ale.Debug, pCTX.Log)
-
-	// Test Cases
-	// No predefined pattern, setting and materializing.
-	// Predefined pattern, materializing immediately. - Expected behavior is to create a empty file unless another file is present.
-
-	// Reset CLI Arguments
-	os.Args = []string{}
-	for _, input := range sampleCLIArgs1 {
-		os.Args = append(os.Args, fmt.Sprintf("--%s", input.cliFlag))
-		os.Args = append(os.Args, input.cliValue)
-	}
-
-	// Energize Transporter State and ensure we Materialize Successfully
-	sampleState := createTestState(0, le, t)
-
-	for _, sample := range sampleCLIArgs1 {
-		le.Log(ale.Verbose, "Checking sample data for \""+sample.patternKey+"\"")
-		sampleval, err1 := sampleState.Get(sample.patternKey)
-
-		if err1 != nil {
-			le.Log(ale.Error, "Failed to get transporter key for \""+sample.patternKey+"\"")
-			t.FailNow()
-		}
-
-		if sampleval != sample.cliValue {
-			le.Log(ale.Error, "Transporter key \""+sample.patternKey+"\" value did not match the CLI passed value.\nCLI: "+sample.cliValue+"\nTransporter: "+sampleval)
-			t.FailNow()
-		}
-	}
-
-	err := sampleState.Materialize()
-
-	if err != nil {
-		le.Log(ale.Error, "Failed to energize pattern...")
-		t.FailNow()
-	} else {
-		le.Log(ale.Info, "Pattern energized!")
-	}
-
-	// #region JSON Input Tests
-
-	// Close State
-	sampleState = nil
-
-	// Modify Age W/O Transporter
-	le.Log(ale.Verbose, "Setting age outside of Transporter to 25.")
-	// The bash command to run
-	cmdStr := `jq '.["user-age"].Value = "25"' transporter_test-0.config.json > transporter_test-0.config.json.tmp && mv transporter_test-0.config.json.tmp transporter_test-0.config.json`
-	// Executing the command through bash -c
-	cmd := exec.Command("bash", "-c", cmdStr)
-	// Run the command and check for errors
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("Error executing command: %s\n", err)
-		t.FailNow()
-	}
-
-	// Remove CLI Arguments
-	os.Args = []string{}
-
-	// Open Previous State
-	sampleState = createTestState(0, le, t)
-
-	time.Sleep(2 * time.Second)
-
-	// Verify Age Changes
-	le.Log(ale.Verbose, "Verifying age outside of Transporter... We expect it to now be 25 once we energize.")
-	sampleval, err1 := sampleState.Get("user-age")
-	if err1 != nil {
-		le.Log(ale.Error, "Failed to get transporter key for \"user-age\"")
-		t.FailNow()
-	}
-	if sampleval != "25" {
-		le.Log(ale.Error, "Transporter key \"user-age\" value did not match the out of band passed value. | OOB: 25 | Transporter: "+sampleval)
-		t.FailNow()
-	} else {
-		le.Log(ale.Info, "Transporter key \"user-age\" value DID match the out of band passed value. | OOB: 25 | Transporter: "+sampleval)
-	}
-
-	// Set New Last Name
-	newFirstname := "sue"
-	err6 := sampleState.Set("user-firstName", newFirstname)
-	if err6 != nil {
-		le.Log(ale.Error, "Transporter key \"user-firstName\" value could not be set.")
-		t.FailNow()
-	}
-
-	// Save State
-	err7 := sampleState.Materialize()
-	if err7 != nil {
-		le.Log(ale.Error, "Transporter state could not save.")
-		t.FailNow()
-	}
-
-	// Close State
-	sampleState = nil
-	// Open Previous State
-	sampleState = createTestState(0, le, t)
-
-	// Verify Changed State
-	savedNewFirstname, err8 := sampleState.Get("user-firstName")
-	if err8 != nil {
-		le.Log(ale.Error, "Transporter key \"user-firstName\" value could not be fetched.")
-		t.FailNow()
-	}
-	if newFirstname != savedNewFirstname {
-		le.Log(ale.Error, "Transporter failed to modify the key \"user-firstName\", materialize and recall it later.")
-		t.FailNow()
-	} else {
-		le.Log(ale.Info, "Transporter successfully modified a key, materialized and recalled it on a reinitalization.")
-	}
-
-	// #endregion JSON Input Tests
-
-	// #region Environment Variable Tests
-	// Close State
-	sampleState = nil
-
-	// Set New ENV
-	err452 := os.Setenv("T_LN", "TESTLASTNAME")
-	if err452 != nil {
-		fmt.Printf("Error setting environment variable: %s\n", err452)
-	}
-
-	// Load New State
-	sampleState = createTestState(-1, le, t)
-
-	stateLastName, err10 := sampleState.Get("user-lastName")
-	if err10 != nil {
-		le.Log(ale.Error, "Transporter key \"user-lastName\" value could not be fetched.")
-		t.FailNow()
-	}
-	if stateLastName != "TESTLASTNAME" {
-		le.Log(ale.Error, "Transporter failed to modify \"user-lastName\" via environment variables. | OOB: TESTLASTNAME | Transporter: "+stateLastName)
-		t.FailNow()
-	} else {
-		le.Log(ale.Info, "Transporter successfully modified a key via environment variables.")
-	}
-	// #endregion Environment Variable Tests
-}
-
-func createTestState(testID int, le *ale.LogEngine, t *testing.T) *transporter.State {
-	// Test ID -1 produces a new state.
-	if testID == -1 {
-		testStateCounter += 1
-		testID = testStateCounter
-	}
-
-	le.Log(ale.Debug, "Energizing Test Pattern...")
-	tle := le.CreateSubEngine("Test " + strconv.Itoa(testID))
-	tle.AddLogPipeline(ale.Debug, pCTX.Log)
-	pattern, err := transporter.Energize(
-		transporter.Pattern{Sequences: map[string]transporter.PatternSequence{
-			sampleCLIArgs1[0].patternKey: {
-				Name:        "User's First Name",
-				Description: "A variable for holding the User's First Name.",
-				CLIFlags:    []string{"f", "fn"},
-				ENVVars:     []string{"FN"},
-			},
-			sampleCLIArgs1[1].patternKey: {
-				Name:               "User's Last Name",
-				Description:        "A variable for holding the User's Last Name.",
-				CLIFlags:           []string{"l", "ln"},
-				ENVVars:            []string{"LN"},
-				DisablePersistence: true,
-			},
-			sampleCLIArgs1[2].patternKey: {
-				Name:        "User's Age",
-				Description: "A variable for holding the user's age.",
-				CLIFlags:    []string{"a", "age"},
-				ENVVars:     []string{"AGE"},
-			},
+// newPattern returns a fresh copy of the pattern most tests use.
+func newPattern() transporter.Pattern {
+	return transporter.Pattern{Sequences: map[string]transporter.PatternSequence{
+		keyFirst: {
+			Name:        "User's First Name",
+			Description: "A variable for holding the user's first name.",
+			CLIFlags:    []string{"f", "fn"},
+			ENVVars:     []string{"FN"},
 		},
-		}, transporter.TransporterOptions{
-			EnvironmentPrefix:        "T_",
-			DumpEnvironmentVariables: false,
-			DumpCLIArguments:         false,
-			LogEngine:                tle,
-			LogEnginePConsoleCTX:     pCTX,
-			ConfigFileEngine:         jsto.New(estFP),
+		keyLast: {
+			Name:               "User's Last Name",
+			Description:        "A variable for holding the user's last name.",
+			CLIFlags:           []string{"l", "ln"},
+			ENVVars:            []string{"LN"},
+			DisablePersistence: true,
 		},
-	)
+		keyAge: {
+			Name:        "User's Age",
+			Description: "A variable for holding the user's age.",
+			CLIFlags:    []string{"a", "age"},
+			ENVVars:     []string{"AGE"},
+		},
+	}}
+}
 
+// logCapture records every message logged to its engine. Safe for concurrent use.
+type logCapture struct {
+	mu   sync.Mutex
+	logs []ale.Log
+}
+
+func newCaptureEngine() (*ale.LogEngine, *logCapture) {
+	c := &logCapture{}
+	le := ale.CreateLogEngine("transporter-test")
+	le.AddLogPipeline(ale.Debug, c.record)
+	return le, c
+}
+
+func (c *logCapture) record(l *ale.Log) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.logs = append(c.logs, *l)
+	return nil
+}
+
+func (c *logCapture) messages() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	msgs := make([]string, len(c.logs))
+	for i, l := range c.logs {
+		msgs[i] = l.Message
+	}
+	return msgs
+}
+
+// stubConfig is an in-memory ConfigFileInterface.
+type stubConfig struct {
+	mu       sync.Mutex
+	loadData map[string]any // nil means "no file": Load returns an error wrapping fs.ErrNotExist
+	loadErr  error
+	saveErr  error
+
+	loadLE *ale.LogEngine
+	saveLE *ale.LogEngine
+}
+
+func (s *stubConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLE = le
+	if s.loadErr != nil {
+		return nil, s.loadErr
+	}
+	if s.loadData == nil {
+		return nil, fmt.Errorf("stub config: %w", fs.ErrNotExist)
+	}
+	return s.loadData, nil
+}
+
+func (s *stubConfig) Save(le *ale.LogEngine, p *transporter.Pattern) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveLE = le
+	return s.saveErr
+}
+
+// baseOptions isolates Energize from the real process (no args, no environment,
+// no config file) and captures all logs at Debug.
+func baseOptions() (transporter.TransporterOptions, *logCapture) {
+	le, logs := newCaptureEngine()
+	return transporter.TransporterOptions{
+		LogEngine:         le,
+		EnvironmentPrefix: transporter.DefaultEnvironmentPrefix,
+		Args:              []string{},
+		Environ:           []string{},
+	}, logs
+}
+
+func energize(t *testing.T, p transporter.Pattern, o transporter.TransporterOptions) *transporter.State {
+	t.Helper()
+	s, err := transporter.Energize(p, o)
 	if err != nil {
-		le.Log(ale.Critical, "Failed to energize. ERR: "+err.Error())
-		t.FailNow()
+		t.Fatalf("Energize: unexpected error: %v", err)
+	}
+	return s
+}
+
+func wantValue(t *testing.T, s *transporter.State, key, want string) {
+	t.Helper()
+	got, err := s.Get(key)
+	if err != nil {
+		t.Fatalf("Get(%q): unexpected error: %v", key, err)
+	}
+	if got != want {
+		t.Errorf("Get(%q) = %q, want %q", key, got, want)
+	}
+}
+
+// wantAll checks every key of newPattern; keys absent from want must be empty.
+func wantAll(t *testing.T, s *transporter.State, want map[string]string) {
+	t.Helper()
+	for _, key := range []string{keyFirst, keyLast, keyAge} {
+		wantValue(t, s, key, want[key])
+	}
+}
+
+func mustNotPanic(t *testing.T, what string, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("%s panicked: %v", what, r)
+		}
+	}()
+	f()
+}
+
+func readConfigFile(t *testing.T, path string) map[string]map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading config file: %v", err)
+	}
+	var cfg map[string]map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decoding config file: %v\n%s", err, data)
+	}
+	return cfg
+}
+
+func writeConfigFile(t *testing.T, path string, cfg map[string]map[string]any) {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encoding config file: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("writing config file: %v", err)
+	}
+}
+
+// #endregion Helpers
+
+func TestLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	o, _ := baseOptions()
+	o.ConfigFileEngine = jsto.New(path)
+
+	// CLI values, no config file yet.
+	o.Args = []string{"--f", "sean", "--ln", "test", "--age", "21"}
+	s := energize(t, newPattern(), o)
+	wantAll(t, s, map[string]string{keyFirst: "sean", keyLast: "test", keyAge: "21"})
+	if err := s.Materialize(); err != nil {
+		t.Fatalf("Materialize: %v", err)
 	}
 
-	return pattern
+	// Edit the file out of band.
+	cfg := readConfigFile(t, path)
+	if got := cfg[keyLast]["Value"]; got != transporter.CONF_DisablePersistence_Phrase {
+		t.Errorf("saved %s Value = %v, want %q", keyLast, got, transporter.CONF_DisablePersistence_Phrase)
+	}
+	if cfg[keyAge] == nil {
+		t.Fatalf("saved config has no %q entry: %v", keyAge, cfg)
+	}
+	cfg[keyAge]["Value"] = "25"
+	writeConfigFile(t, path, cfg)
+
+	// Reload from the file alone.
+	o.Args = []string{}
+	s = energize(t, newPattern(), o)
+	wantAll(t, s, map[string]string{keyFirst: "sean", keyAge: "25"})
+
+	// Set, persist, reload.
+	if err := s.Set(keyFirst, "sue"); err != nil {
+		t.Fatalf("Set(%q): %v", keyFirst, err)
+	}
+	if err := s.Materialize(); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	s = energize(t, newPattern(), o)
+	wantAll(t, s, map[string]string{keyFirst: "sue", keyAge: "25"})
+
+	// Environment on top of the file.
+	o.Environ = []string{"T_LN=TESTLASTNAME"}
+	s = energize(t, newPattern(), o)
+	wantAll(t, s, map[string]string{keyFirst: "sue", keyLast: "TESTLASTNAME", keyAge: "25"})
 }
+
+func TestSourcePrecedence(t *testing.T) {
+	cases := []struct {
+		name    string
+		environ []string
+		args    []string
+		want    string
+	}{
+		{"file only", nil, nil, "file"},
+		{"env beats file", []string{"T_FN=env"}, nil, "env"},
+		{"CLI beats env and file", []string{"T_FN=env"}, []string{"--f", "cli"}, "cli"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := baseOptions()
+			o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
+				keyFirst: map[string]any{"DisablePersistence": false, "Value": "file"},
+			}}
+			o.Environ = append(o.Environ, tc.environ...)
+			o.Args = append(o.Args, tc.args...)
+			wantValue(t, energize(t, newPattern(), o), keyFirst, tc.want)
+		})
+	}
+}
+
+// #region Regression tests
+
+func TestMaterializeKeepsInMemoryValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	o, _ := baseOptions()
+	o.ConfigFileEngine = jsto.New(path)
+	o.Args = []string{"--ln", "secret-last", "--f", "sean"}
+	s := energize(t, newPattern(), o)
+
+	// Twice: a second save must not observe a value redacted by the first.
+	for i := 0; i < 2; i++ {
+		if err := s.Materialize(); err != nil {
+			t.Fatalf("Materialize #%d: %v", i+1, err)
+		}
+	}
+
+	wantValue(t, s, keyLast, "secret-last")
+	cfg := readConfigFile(t, path)
+	if got := cfg[keyLast]["Value"]; got != transporter.CONF_DisablePersistence_Phrase {
+		t.Errorf("saved %s Value = %v, want %q", keyLast, got, transporter.CONF_DisablePersistence_Phrase)
+	}
+	if got := cfg[keyFirst]["Value"]; got != "sean" {
+		t.Errorf("saved %s Value = %v, want %q", keyFirst, got, "sean")
+	}
+}
+
+func TestMaterializeWithoutEngine(t *testing.T) {
+	o, _ := baseOptions()
+	s := energize(t, newPattern(), o)
+	var err error
+	mustNotPanic(t, "Materialize without a ConfigFileEngine", func() { err = s.Materialize() })
+	if !errors.Is(err, transporter.ErrNoConfigFileEngine) {
+		t.Errorf("Materialize: err = %v, want ErrNoConfigFileEngine", err)
+	}
+}
+
+func TestConfigFileLogEngineOnly(t *testing.T) {
+	cfgLE, _ := newCaptureEngine()
+	stub := &stubConfig{loadData: map[string]any{
+		keyAge: map[string]any{"DisablePersistence": false, "Value": "40"},
+	}}
+	o := transporter.TransporterOptions{ // LogEngine deliberately nil
+		ConfigFileLogEngine: cfgLE,
+		ConfigFileEngine:    stub,
+		EnvironmentPrefix:   transporter.DefaultEnvironmentPrefix,
+		Args:                []string{},
+		Environ:             []string{},
+	}
+	mustNotPanic(t, "Energize/Set/Materialize with only ConfigFileLogEngine", func() {
+		s := energize(t, newPattern(), o)
+		wantValue(t, s, keyAge, "40")
+		if err := s.Set(keyFirst, "x"); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		if err := s.Materialize(); err != nil {
+			t.Fatalf("Materialize: %v", err)
+		}
+	})
+	if stub.loadLE != cfgLE {
+		t.Errorf("Load did not receive ConfigFileLogEngine")
+	}
+	if stub.saveLE == nil {
+		t.Errorf("Save received a nil log engine")
+	}
+}
+
+func TestCorruptConfigFailsEnergize(t *testing.T) {
+	t.Run("jsto garbage file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		garbage := []byte("{not json")
+		if err := os.WriteFile(path, garbage, 0o600); err != nil {
+			t.Fatalf("writing garbage file: %v", err)
+		}
+		o, _ := baseOptions()
+		o.ConfigFileEngine = jsto.New(path)
+		if _, err := transporter.Energize(newPattern(), o); err == nil {
+			t.Errorf("Energize with a corrupt config file succeeded, want error")
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading config file: %v", err)
+		}
+		if !bytes.Equal(got, garbage) {
+			t.Errorf("config file changed: got %q, want %q", got, garbage)
+		}
+	})
+
+	t.Run("stub load error", func(t *testing.T) {
+		o, _ := baseOptions()
+		o.ConfigFileEngine = &stubConfig{loadErr: errors.New("stub: permission denied")}
+		if _, err := transporter.Energize(newPattern(), o); err == nil {
+			t.Errorf("Energize with a failing Load succeeded, want error")
+		}
+	})
+
+	t.Run("missing file is not an error", func(t *testing.T) {
+		o, _ := baseOptions()
+		o.ConfigFileEngine = &stubConfig{} // Load wraps fs.ErrNotExist
+		energize(t, newPattern(), o)
+	})
+}
+
+func TestSaveErrorPropagates(t *testing.T) {
+	saveErr := errors.New("stub: disk full")
+	o, _ := baseOptions()
+	o.ConfigFileEngine = &stubConfig{saveErr: saveErr}
+	s := energize(t, newPattern(), o)
+	if err := s.Materialize(); !errors.Is(err, saveErr) {
+		t.Errorf("Materialize: err = %v, want %v", err, saveErr)
+	}
+}
+
+func TestEnvValueWithEquals(t *testing.T) {
+	o, _ := baseOptions()
+	o.Environ = []string{"T_FN=a=b"}
+	wantValue(t, energize(t, newPattern(), o), keyFirst, "a=b")
+}
+
+func TestCLIForms(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want map[string]string // keys not listed must stay empty
+	}{
+		{"--flag value", []string{"--f", "v"}, map[string]string{keyFirst: "v"}},
+		{"-flag value", []string{"-f", "v"}, map[string]string{keyFirst: "v"}},
+		{"--flag=value", []string{"--f=v"}, map[string]string{keyFirst: "v"}},
+		{"alias and sequence key", []string{"--fn", "a", "--user-age", "30"}, map[string]string{keyFirst: "a", keyAge: "30"}},
+		{"-- ends parsing", []string{"--f", "x", "--", "--f", "v", "--age", "9"}, map[string]string{keyFirst: "x"}},
+		{"unknown flag does not consume next arg", []string{"--nope", "--f", "v"}, map[string]string{keyFirst: "v"}},
+		{"explicit Args parsed from first element", []string{"--age", "99", "--f", "v"}, map[string]string{keyFirst: "v", keyAge: "99"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := baseOptions()
+			o.Args = tc.args
+			wantAll(t, energize(t, newPattern(), o), tc.want)
+		})
+	}
+
+	t.Run("nil Args skips argv[0]", func(t *testing.T) {
+		orig := os.Args
+		t.Cleanup(func() { os.Args = orig })
+		os.Args = []string{"--age", "99", "--f", "v"}
+
+		o, _ := baseOptions()
+		o.Args = nil
+		wantAll(t, energize(t, newPattern(), o), map[string]string{keyFirst: "v"})
+	})
+}
+
+func TestEmptyPrefixDefaultsToT(t *testing.T) {
+	o, _ := baseOptions()
+	o.EnvironmentPrefix = ""
+	o.Environ = []string{"T_FN=prefixed", "FN=bare"}
+	wantValue(t, energize(t, newPattern(), o), keyFirst, "prefixed")
+}
+
+func TestSourceIsolation(t *testing.T) {
+	t.Run("CLI flag named like an ENV var", func(t *testing.T) {
+		o, _ := baseOptions()
+		o.Args = []string{"--FN", "cli", "--age", "30"}
+		wantAll(t, energize(t, newPattern(), o), map[string]string{keyAge: "30"})
+	})
+
+	t.Run("ENV var named like a CLI flag", func(t *testing.T) {
+		o, _ := baseOptions()
+		o.Environ = []string{"T_fn=env", "T_f=env", "T_user-age=30"}
+		wantAll(t, energize(t, newPattern(), o), map[string]string{keyAge: "30"})
+	})
+}
+
+func TestDuplicateIdentifiers(t *testing.T) {
+	type seqs = map[string]transporter.PatternSequence
+	cases := []struct {
+		name    string
+		seqs    seqs
+		wantDup bool
+	}{
+		{"shared CLI flag", seqs{"a": {CLIFlags: []string{"x"}}, "b": {CLIFlags: []string{"x"}}}, true},
+		{"shared ENV var", seqs{"a": {ENVVars: []string{"X"}}, "b": {ENVVars: []string{"X"}}}, true},
+		{"CLI flag equals another key", seqs{"a": {}, "b": {CLIFlags: []string{"a"}}}, true},
+		{"ENV var equals another key", seqs{"a": {}, "b": {ENVVars: []string{"a"}}}, true},
+		{"same name in CLI and ENV namespaces", seqs{"a": {CLIFlags: []string{"x"}}, "b": {ENVVars: []string{"x"}}}, false},
+		{"repeats within one sequence", seqs{"a": {CLIFlags: []string{"a", "x"}, ENVVars: []string{"a", "x"}}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o, _ := baseOptions()
+			_, err := transporter.Energize(transporter.Pattern{Sequences: tc.seqs}, o)
+			if tc.wantDup && !errors.Is(err, transporter.ErrDuplicateIdentifier) {
+				t.Errorf("Energize: err = %v, want ErrDuplicateIdentifier", err)
+			}
+			if !tc.wantDup && err != nil {
+				t.Errorf("Energize: unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestCallerPatternNotMutated(t *testing.T) {
+	p := newPattern()
+	o, _ := baseOptions()
+	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
+		keyAge: map[string]any{"DisablePersistence": false, "Value": "50"},
+	}}
+	o.Args = []string{"--f", "cli"}
+	o.Environ = []string{"T_LN=env"}
+
+	s := energize(t, p, o)
+	if err := s.Set(keyAge, "51"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := s.Materialize(); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	for key, seq := range p.Sequences {
+		if seq.Value != "" {
+			t.Errorf("caller's pattern mutated: %s Value = %q, want empty", key, seq.Value)
+		}
+	}
+
+	// Changes to the caller's map must not reach the state either.
+	seq := p.Sequences[keyFirst]
+	seq.Value = "mutated"
+	p.Sequences[keyFirst] = seq
+	delete(p.Sequences, keyAge)
+	wantAll(t, s, map[string]string{keyFirst: "cli", keyLast: "env", keyAge: "51"})
+}
+
+func TestConfigEntryWithoutDisablePersistenceLoads(t *testing.T) {
+	o, _ := baseOptions()
+	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
+		keyAge: map[string]any{"Value": "33"},
+	}}
+	wantValue(t, energize(t, newPattern(), o), keyAge, "33")
+}
+
+func TestFileCannotReenableDisabledPersistence(t *testing.T) {
+	o, _ := baseOptions()
+	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
+		keyLast: map[string]any{"DisablePersistence": false, "Value": "from-file"},
+		keyAge:  map[string]any{"DisablePersistence": false, "Value": "33"}, // control: file was read
+	}}
+	wantAll(t, energize(t, newPattern(), o), map[string]string{keyAge: "33"})
+}
+
+func TestRequiredMissing(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		environ []string
+		wantErr bool
+	}{
+		{"no source", nil, nil, true},
+		{"empty CLI value", []string{"--age", ""}, nil, true},
+		{"CLI", []string{"--age", "30"}, nil, false},
+		{"env", nil, []string{"T_AGE=30"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPattern()
+			age := p.Sequences[keyAge]
+			age.Required = true
+			p.Sequences[keyAge] = age
+
+			o, _ := baseOptions()
+			o.Args = append(o.Args, tc.args...)
+			o.Environ = append(o.Environ, tc.environ...)
+			s, err := transporter.Energize(p, o)
+			if tc.wantErr {
+				if !errors.Is(err, transporter.ErrRequiredMissing) {
+					t.Errorf("Energize: err = %v, want ErrRequiredMissing", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Energize: unexpected error: %v", err)
+			}
+			wantValue(t, s, keyAge, "30")
+		})
+	}
+}
+
+func TestSecretsNeverLogged(t *testing.T) {
+	const canary = "c4n4ry"
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFile(t, path, map[string]map[string]any{
+		keyAge: {"DisablePersistence": false, "Value": canary + "-file"},
+	})
+
+	o, logs := baseOptions()
+	o.ConfigFileEngine = jsto.New(path)
+	o.DumpEnvironmentVariables = true
+	o.DumpCLIArguments = true
+	o.Environ = []string{"T_LN=" + canary + "-env", "UNRELATED=" + canary + "-unrelated"}
+	o.Args = []string{"--f", canary + "-cli", "--age=" + canary + "-cli-eq"}
+
+	s := energize(t, newPattern(), o)
+	wantAll(t, s, map[string]string{keyFirst: canary + "-cli", keyLast: canary + "-env", keyAge: canary + "-cli-eq"})
+	if err := s.Set(keyFirst, canary+"-set"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if err := s.Materialize(); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+
+	msgs := logs.messages()
+	if len(msgs) == 0 {
+		t.Fatalf("no log messages captured; the leak check would be vacuous")
+	}
+	for _, m := range msgs {
+		if strings.Contains(m, canary) {
+			t.Errorf("log message leaks a value: %q", m)
+		}
+	}
+}
+
+func TestGetUnknownKey(t *testing.T) {
+	o, _ := baseOptions()
+	s := energize(t, newPattern(), o)
+	if _, err := s.Get("missing"); !errors.Is(err, transporter.ErrKeyNotFound) {
+		t.Errorf("Get(missing): err = %v, want ErrKeyNotFound", err)
+	}
+	if err := s.Set("missing", "x"); !errors.Is(err, transporter.ErrKeyNotFound) {
+		t.Errorf("Set(missing): err = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// TestConcurrentGetSet stays last: against a non-copy-on-write Set it can die
+// with a fatal concurrent map access, which would hide later tests' results.
+func TestConcurrentGetSet(t *testing.T) {
+	o, _ := baseOptions()
+	o.ConfigFileEngine = &stubConfig{}
+	s := energize(t, newPattern(), o)
+
+	const workers, iterations = 4, 200
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if err := s.Set(keyFirst, fmt.Sprintf("w%d-%d", w, i)); err != nil {
+					t.Errorf("Set: %v", err)
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if _, err := s.Get(keyFirst); err != nil {
+					t.Errorf("Get: %v", err)
+					return
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations/20; i++ {
+				if err := s.Materialize(); err != nil {
+					t.Errorf("Materialize: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if err := s.Set(keyFirst, "final"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	wantValue(t, s, keyFirst, "final")
+}
+
+// #endregion Regression tests
