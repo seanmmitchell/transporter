@@ -78,15 +78,17 @@ func TestLoadMissingFileWrapsErrNotExist(t *testing.T) {
 }
 
 func TestLoadCorruptJSON(t *testing.T) {
-	// encoding/json syntax errors quote the offending byte
-	// ("invalid character 'Z' in literal true"), so 'Z' is a canary for file
-	// content leaking into logs or returned errors.
-	const canary = "'Z'"
-	for name, contents := range map[string]string{
-		"bad literal": `{"token": {"Value": tZ}}`,
-		"bad start":   `Z13371337`,
-		"truncated":   `{"token": {"Value": "Z`,
+	// encoding/json errors quote file content: syntax errors quote the
+	// offending byte ("invalid character 'Z' in literal true") and overflowing
+	// numbers their literal ("cannot unmarshal number 1e999"). Both are
+	// canaries for file content leaking into logs or returned errors.
+	for name, tc := range map[string]struct{ contents, canary string }{
+		"bad literal": {`{"token": {"Value": tZ}}`, "'Z'"},
+		"bad start":   {`Z13371337`, "'Z'"},
+		"truncated":   {`{"token": {"Value": "Z`, "'Z'"},
+		"overflow":    {`{"token": {"Value": 1e999}}`, "1e999"},
 	} {
+		contents, canary := tc.contents, tc.canary
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "conf.json")
 			writeFile(t, path, contents)
@@ -98,6 +100,12 @@ func TestLoadCorruptJSON(t *testing.T) {
 			}
 			if errors.Is(err, fs.ErrNotExist) {
 				t.Fatalf("Load error %v must not match fs.ErrNotExist", err)
+			}
+			if !errors.Is(err, jsto.ErrInvalidJSON) {
+				t.Fatalf("Load error %v must wrap ErrInvalidJSON", err)
+			}
+			if strings.Contains(err.Error(), "must be an object") {
+				t.Fatalf("Load error %v blames the top-level type of an object file", err)
 			}
 			if strings.Contains(err.Error(), canary) {
 				t.Fatalf("file contents leaked into the returned error: %v", err)
@@ -236,34 +244,63 @@ func TestSaveFileModeIsPrivate(t *testing.T) {
 	})
 }
 
-func TestSaveThroughSymlink(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("creating symlinks needs extra privileges on windows")
+// TestSaveRefusesNonRegularFile guards against a planted symlink redirecting
+// the write (e.g. /tmp/conf.json -> ~/.bashrc) and against replacing special
+// files such as /dev/null.
+func TestSaveRefusesNonRegularFile(t *testing.T) {
+	wantRefused := func(t *testing.T, path string) {
+		t.Helper()
+		err := jsto.New(path).Save(quietLogger(), samplePattern("must-not-be-written"))
+		if !errors.Is(err, jsto.ErrNotRegularFile) {
+			t.Fatalf("Save(%q): err = %v, want ErrNotRegularFile", path, err)
+		}
+		assertNoTempFiles(t, filepath.Dir(path))
 	}
-	targetDir, linkDir := t.TempDir(), t.TempDir()
-	target := filepath.Join(targetDir, "real.json")
-	link := filepath.Join(linkDir, "conf.json")
-	writeFile(t, target, "{}")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
+	assertSymlink := func(t *testing.T, link string) {
+		t.Helper()
+		if info, err := os.Lstat(link); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+			t.Fatalf("symlink was replaced (info=%v, err=%v)", info, err)
+		}
 	}
 
-	if err := jsto.New(link).Save(quietLogger(), samplePattern("via-link")); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	t.Run("directory", func(t *testing.T) {
+		wantRefused(t, t.TempDir())
+	})
 
-	if info, err := os.Lstat(link); err != nil || info.Mode()&fs.ModeSymlink == 0 {
-		t.Fatalf("symlink was replaced (info=%v, err=%v)", info, err)
-	}
-	data, err := jsto.New(target).Load(quietLogger())
-	if err != nil {
-		t.Fatalf("Load target: %v", err)
-	}
-	if got := data["token"].(map[string]interface{})["Value"]; got != "via-link" {
-		t.Fatalf("target Value = %v, want %q", got, "via-link")
-	}
-	assertNoTempFiles(t, targetDir)
-	assertNoTempFiles(t, linkDir)
+	t.Run("symlink to existing file", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("creating symlinks needs extra privileges on windows")
+		}
+		target := filepath.Join(t.TempDir(), "victim")
+		writeFile(t, target, "original")
+		link := filepath.Join(t.TempDir(), "conf.json")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+
+		wantRefused(t, link)
+		assertSymlink(t, link)
+		if got, err := os.ReadFile(target); err != nil || string(got) != "original" {
+			t.Fatalf("symlink target was modified: %q, %v", got, err)
+		}
+	})
+
+	t.Run("dangling symlink", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("creating symlinks needs extra privileges on windows")
+		}
+		target := filepath.Join(t.TempDir(), "absent.json")
+		link := filepath.Join(t.TempDir(), "conf.json")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+
+		wantRefused(t, link)
+		assertSymlink(t, link)
+		if _, err := os.Lstat(target); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("symlink target was created: %v", err)
+		}
+	})
 }
 
 func TestSaveLeavesNoTempFiles(t *testing.T) {

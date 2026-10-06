@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 
 	"github.com/seanmmitchell/ale/v2"
@@ -15,6 +16,12 @@ import (
 )
 
 var (
+	// ErrInvalidJSON is wrapped by Load errors for files that are not a valid JSON object.
+	ErrInvalidJSON = errors.New("jsto: invalid JSON")
+	// ErrNotRegularFile is returned by Save when FilePath exists but is not a
+	// regular file (a symlink, directory, device, FIFO, ...).
+	ErrNotRegularFile = errors.New("jsto: config path is not a regular file")
+
 	errEmptyPath  = errors.New("jsto: FilePath is empty")
 	errNilPattern = errors.New("jsto: cannot save a nil pattern")
 )
@@ -69,7 +76,7 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 	err = json.Unmarshal(allBytes, &jsonData)
 	if err != nil {
 		le.Log(ale.Error, fmt.Sprintf("\t==> Failed to unmarshal JSON file %q.", path))
-		return nil, fmt.Errorf("jsto: parsing %q: %s", path, describeJSONError(err))
+		return nil, fmt.Errorf("jsto: parsing %q: %w: %s", path, ErrInvalidJSON, describeJSONError(err))
 	}
 	if jsonData == nil {
 		// The file held a JSON null.
@@ -84,6 +91,8 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 // Save writes the pattern's sequences to FilePath as indented JSON. The data
 // goes to a private (0600) temporary file in the same directory which is then
 // renamed over FilePath, so readers never observe a partially written file.
+// If FilePath exists but is not a regular file (e.g. a symlink), Save returns
+// ErrNotRegularFile rather than following or replacing it.
 func (conf *JSONConfig) Save(le *ale.LogEngine, pattern *transporter.Pattern) error {
 	conf.mu.Lock()
 	defer conf.mu.Unlock()
@@ -108,9 +117,13 @@ func (conf *JSONConfig) Save(le *ale.LogEngine, pattern *transporter.Pattern) er
 	}
 	le.Log(ale.Verbose, "Pattern Marshaled.")
 
-	// Write through a symlink so the link itself survives the rename.
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
+	// Refuse symlinks and special files: following a link in user space would
+	// bypass the kernel's protected_symlinks checks (e.g. a link planted in
+	// /tmp), and renaming over a device node would replace it. A link swapped
+	// in after this check is only replaced by the rename, never followed.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		le.Log(ale.Error, fmt.Sprintf("\t==> JSON file path %q is not a regular file.", path))
+		return fmt.Errorf("%w: %q", ErrNotRegularFile, path)
 	}
 
 	le.Log(ale.Verbose, "Writing JSON File...")
@@ -164,7 +177,11 @@ func describeJSONError(err error) string {
 	}
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) {
-		return "top-level JSON value must be an object"
+		if typeErr.Type != nil && typeErr.Type.Kind() == reflect.Map {
+			return "top-level JSON value must be an object"
+		}
+		// e.g. a number that overflows float64; its message quotes the literal.
+		return fmt.Sprintf("unsupported value at byte offset %d", typeErr.Offset)
 	}
 	return "invalid JSON"
 }
