@@ -28,40 +28,32 @@ func dumpEnvironmentVariables(le *ale.LogEngine, environ []string, prefix string
 	le.Log(ale.Debug, b.String())
 }
 
-// dumpCLIVariables logs, at Debug level, the shape of the CLI arguments with
-// every value redacted:
-//   - flag tokens (leading "-", but not a lone "-") are printed as-is, except
-//     that the value of "--name=value" / "-name=value" is redacted;
-//   - every other token is redacted, as is the token right after a bare flag
-//     (it is that flag's value, even when it starts with "-");
-//   - "--" is always printed as-is (it is never a flag's value), and
-//     everything after it is redacted.
+// cliToken is the parser's view of one CLI argument, for dumpCLIVariables.
+// flag is set only for tokens the parser identified as a known flag (without
+// any "=value") or the "--" terminator; everything else stays zero.
+type cliToken struct {
+	flag   string
+	inline bool // the flag carried an "=value"
+}
+
+// dumpCLIVariables logs, at Debug level, the shape of the CLI arguments as the
+// parser saw them: known flags and "--" are printed, inline values become
+// "=<redacted>", and every other token (values, positionals, unknown flags,
+// anything after "--") is printed as <redacted>. Unknown flags are redacted
+// because the parser cannot tell them from values such as "-s3cret".
 //
 // Printed names are %q-quoted to prevent log injection.
-func dumpCLIVariables(le *ale.LogEngine, args []string) {
+func dumpCLIVariables(le *ale.LogEngine, tokens []cliToken) {
 	var b strings.Builder
 	b.WriteString("Dumping CLI Arguments (values redacted):")
-	expectValue := false
-	terminated := false
-	for _, arg := range args {
+	for _, tok := range tokens {
 		switch {
-		case terminated:
+		case tok.flag == "":
 			b.WriteString("\n\t\t==> " + redacted)
-		case arg == "--":
-			fmt.Fprintf(&b, "\n\t\t==> %q", arg)
-			terminated = true
-		case expectValue:
-			b.WriteString("\n\t\t==> " + redacted)
-			expectValue = false
-		case strings.HasPrefix(arg, "-") && arg != "-":
-			if name, _, hasValue := strings.Cut(arg, "="); hasValue {
-				fmt.Fprintf(&b, "\n\t\t==> %q=%s", name, redacted)
-			} else {
-				fmt.Fprintf(&b, "\n\t\t==> %q", arg)
-				expectValue = true
-			}
+		case tok.inline:
+			fmt.Fprintf(&b, "\n\t\t==> %q=%s", tok.flag, redacted)
 		default:
-			b.WriteString("\n\t\t==> " + redacted)
+			fmt.Fprintf(&b, "\n\t\t==> %q", tok.flag)
 		}
 	}
 	le.Log(ale.Debug, b.String())

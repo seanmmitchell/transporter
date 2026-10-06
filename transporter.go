@@ -175,12 +175,13 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 	if args == nil && len(os.Args) > 1 {
 		args = os.Args[1:]
 	}
-	if tOpts.DumpCLIArguments {
-		dumpCLIVariables(le, args)
-	}
+	// tokens records what the parser identified, so the debug dump can show
+	// known flags and redact everything else (values, positionals, unknowns).
+	tokens := make([]cliToken, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
+			tokens[i] = cliToken{flag: arg}
 			break
 		}
 
@@ -204,6 +205,8 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 			le.Log(ale.Warning, fmt.Sprintf("Unknown CLI flag at index %d, skipping.", i))
 			continue
 		}
+		flag, _, _ := strings.Cut(arg, "=")
+		tokens[i] = cliToken{flag: flag, inline: hasValue}
 		if !hasValue {
 			if i+1 >= len(args) || args[i+1] == "--" {
 				le.Log(ale.Warning, fmt.Sprintf("CLI flag %q is missing a value, skipping.", name))
@@ -215,6 +218,9 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 		}
 		setValue(&pattern, key, value)
 		le.Log(ale.Verbose, fmt.Sprintf("CLI flag %q assigned to key %q.", name, key))
+	}
+	if tOpts.DumpCLIArguments {
+		dumpCLIVariables(le, tokens)
 	}
 
 	// Check Required
@@ -327,7 +333,7 @@ func loadConfig(le *ale.LogEngine, pattern *Pattern, confData map[string]interfa
 
 // buildIndex maps every sequence key and every identifier returned by ids to
 // its sequence key. An identifier claimed by two sequences is an error, as is
-// one that could never match: containing "=" or, when badPrefix is set,
+// one that could never match: empty, containing "=" or, when badPrefix is set,
 // starting with it.
 func buildIndex(pattern Pattern, kind string, badPrefix string, ids func(PatternSequence) []string) (map[string]string, error) {
 	index := make(map[string]string)
@@ -350,7 +356,7 @@ func buildIndex(pattern Pattern, kind string, badPrefix string, ids func(Pattern
 	}
 	for _, key := range keys {
 		for _, id := range ids(pattern.Sequences[key]) {
-			if strings.Contains(id, "=") || (badPrefix != "" && strings.HasPrefix(id, badPrefix)) {
+			if id == "" || strings.Contains(id, "=") || (badPrefix != "" && strings.HasPrefix(id, badPrefix)) {
 				return nil, fmt.Errorf("%w: %s %q of %q can never match", ErrInvalidIdentifier, kind, id, key)
 			}
 			if err := claim(id, key); err != nil {

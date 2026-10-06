@@ -326,7 +326,7 @@ func TestConfigFileLogEngineOnly(t *testing.T) {
 
 // overlapConfig records whether two Saves ever run at the same time.
 type overlapConfig struct {
-	active, overlapped atomic.Int32
+	calls, active, overlapped atomic.Int32
 }
 
 func (c *overlapConfig) Load(*ale.LogEngine) (map[string]interface{}, error) {
@@ -334,6 +334,7 @@ func (c *overlapConfig) Load(*ale.LogEngine) (map[string]interface{}, error) {
 }
 
 func (c *overlapConfig) Save(*ale.LogEngine, *transporter.Pattern) error {
+	c.calls.Add(1)
 	if c.active.Add(1) > 1 {
 		c.overlapped.Store(1)
 	}
@@ -361,6 +362,9 @@ func TestMaterializeSerialized(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	if got := cfg.calls.Load(); got != 40 {
+		t.Fatalf("Save called %d times, want 40", got)
+	}
 	if cfg.overlapped.Load() != 0 {
 		t.Errorf("concurrent Materialize calls overlapped in Save; an older snapshot could overwrite a newer one")
 	}
@@ -510,6 +514,8 @@ func TestInvalidIdentifiers(t *testing.T) {
 		"CLI flag with a dash":  {"a": {CLIFlags: []string{"-p"}}},
 		"CLI flag containing =": {"a": {CLIFlags: []string{"p=1"}}},
 		"ENV var containing =":  {"a": {ENVVars: []string{"P=1"}}},
+		"empty CLI flag":        {"a": {CLIFlags: []string{""}}},
+		"empty ENV var":         {"a": {ENVVars: []string{""}}},
 	}
 	for name, s := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -570,7 +576,7 @@ func TestFileCannotReenableDisabledPersistence(t *testing.T) {
 }
 
 func TestConfigEntrySkipping(t *testing.T) {
-	o, _ := baseOptions()
+	o, logs := baseOptions()
 	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
 		keyFirst: map[string]any{"DisablePersistence": true, "Value": "file-disabled"}, // file flag alone disables
 		keyAge:   "not an object",
@@ -579,9 +585,18 @@ func TestConfigEntrySkipping(t *testing.T) {
 	wantAll(t, energize(t, newPattern(), o), map[string]string{})
 
 	o.ConfigFileEngine = &stubConfig{loadData: map[string]any{
-		keyAge: map[string]any{"Value": 33}, // non-string Value
+		keyAge:   map[string]any{"Value": 33},       // non-string Value
+		keyFirst: map[string]any{"Value": "loaded"}, // control: valid entries still load
 	}}
-	wantAll(t, energize(t, newPattern(), o), map[string]string{})
+	wantAll(t, energize(t, newPattern(), o), map[string]string{keyFirst: "loaded"})
+
+	// Each skip must come from loadConfig's checks, not from never reading the file.
+	all := strings.Join(logs.messages(), "\n")
+	for _, want := range []string{"is not an object", "does not match any pattern", "has no string value"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("no %q warning logged; got:\n%s", want, all)
+		}
+	}
 }
 
 func TestRequiredMissing(t *testing.T) {
@@ -633,12 +648,22 @@ func TestSecretsNeverLogged(t *testing.T) {
 	o.DumpEnvironmentVariables = true
 	o.DumpCLIArguments = true
 	o.Environ = []string{"T_LN=" + canary + "-env", "UNRELATED=" + canary + "-unrelated"}
-	// "-…-after-unknown" follows an unknown flag, so the parser sees it as
-	// another unknown flag; it is still a value and must not be logged.
-	o.Args = []string{"--f", canary + "-cli", "--age=" + canary + "-cli-eq", "--tokn", "-" + canary + "-after-unknown", canary + "-positional"}
+	o.Args = []string{
+		"--f", canary + "-cli",
+		"--age=" + canary + "-cli-eq",
+		// Follows an unknown flag, so the parser sees another unknown flag;
+		// it is still a value and must not be logged.
+		"--tokn", "-" + canary + "-after-unknown",
+		// An unknown bare flag before a known one: the known flag's value
+		// starts with "-" (e.g. URL-safe base64) and must not be dumped.
+		"--nope", "--age", "-" + canary + "-dash-value",
+		// mysql-style attached value on an unknown flag.
+		"-p" + canary + "-attached",
+		canary + "-positional",
+	}
 
 	s := energize(t, newPattern(), o)
-	wantAll(t, s, map[string]string{keyFirst: canary + "-cli", keyLast: canary + "-env", keyAge: canary + "-cli-eq"})
+	wantAll(t, s, map[string]string{keyFirst: canary + "-cli", keyLast: canary + "-env", keyAge: "-" + canary + "-dash-value"})
 	if err := s.Set(keyFirst, canary+"-set"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
