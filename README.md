@@ -74,7 +74,7 @@ func main() {
 | PatternSequence field | Meaning                                                                                       |
 | --------------------- | --------------------------------------------------------------------------------------------- |
 | `Value`               | Default before loading; current value after.                                                  |
-| `CLIFlags`            | Flag names without dashes or `=` (else `ErrInvalidIdentifier`). The sequence key also works as a flag. |
+| `CLIFlags`            | Non-empty flag names without dashes or `=` (else `ErrInvalidIdentifier`). The sequence key also works as a flag. |
 | `ENVVars`             | Variable names without the prefix or `=`. The sequence key also works (`APP_port`).           |
 | `Required`            | `Energize` returns `ErrRequiredMissing` if the sequence still has no value after loading.      |
 | `DisablePersistence`  | `Materialize` saves `"no persistence"` instead of the value; that config entry is never loaded. |
@@ -87,7 +87,7 @@ func main() {
 | CLI forms            | `--name value`, `--name=value`, `-name value`. A value may start with `-` (`--offset -5`), but `--` is never a value: it ends parsing. `argv[0]` is never parsed. Unknown flags are skipped with a Warning that names only their position (the token may be a value). |
 | Environment Prefix   | Only variables starting with the prefix (default `"T_"`) are read. The rest of the name is matched. Values may contain `=`.                    |
 | Identifiers          | Sequence keys, CLI flags and ENV var names must be unique within their source. A duplicate makes `Energize` return `ErrDuplicateIdentifier`. |
-| Config file          | Entries are matched by sequence key. A missing file is fine (it is created by `Materialize`).                                                 |
+| Config file          | Entries are matched by sequence key. A missing file is fine (it is created by `Materialize`). A key containing `=` can only be set from the config file. |
 
 ## Transporter Defaults
 | Variable Name            | Default Value                      | Details                                                                                                                                                             |
@@ -100,7 +100,7 @@ func main() {
 | Environ                  | `os.Environ()` (when nil)          | `KEY=value` entries to read. As with Args, pass `[]string{}` for none.                                                                                              |
 | ConfigFileEngine         | nil                                | By default, Transporter is simply a CLI & ENV argument aggregator and state management tool. Set it (e.g. `jsto.New("config.json")`) to get a JSON configuration file. |
 | DumpEnvironmentVariables | false                              | Logs the names of prefixed variables at Debug level. Values are redacted. Needs a LogEngine with a Debug pipeline; the default engine hides it.                     |
-| DumpCLIArguments         | false                              | Logs the CLI arguments at Debug level. Values are redacted. Needs a LogEngine with a Debug pipeline; the default engine hides it.                                   |
+| DumpCLIArguments         | false                              | Logs the CLI arguments as parsed, at Debug level: known flags by name, every other token `<redacted>`. Needs a LogEngine with a Debug pipeline; the default engine hides it. |
 
 ## Errors
 Errors are wrapped with context, so check them with `errors.Is`.
@@ -110,16 +110,19 @@ Errors are wrapped with context, so check them with `errors.Is`.
 | `ErrKeyNotFound`         | Get, Set     | The key is not in the pattern.                                             |
 | `ErrNoConfigFileEngine`  | Materialize  | No ConfigFileEngine was configured.                                        |
 | `ErrDuplicateIdentifier` | Energize     | A key/flag/ENV name maps to more than one sequence in the same source.     |
-| `ErrInvalidIdentifier`   | Energize     | A CLI flag starts with `-` or contains `=`, or an ENV name contains `=`.   |
+| `ErrInvalidIdentifier`   | Energize     | A CLI flag is empty, starts with `-` or contains `=`, or an ENV name is empty or contains `=`. |
 | `ErrRequiredMissing`     | Energize     | A `Required` sequence has no value after loading.                          |
+| `jsto.ErrInvalidJSON`    | Load (and so Energize) | The config file is not a JSON object.                            |
+| `jsto.ErrNotRegularFile` | Save (and so Materialize) | The config path is a symlink, directory or other non-regular file. |
 
-`Energize` also fails when the config file exists but cannot be read or parsed. A missing file is not an error. A custom `ConfigFileInterface` must return an error wrapping `fs.ErrNotExist` for a missing file. Always obtain a `State` from `Energize`; a zero `State` is not usable.
+`Energize` also fails when the config file exists but cannot be read or parsed. A missing file is not an error. A custom `ConfigFileInterface` must return an error wrapping `fs.ErrNotExist` for a missing file, and its `Save` (like any log pipeline) must not call `Materialize`, which would deadlock. Always obtain a `State` from `Energize`; a zero `State` is not usable.
 
 ## Security Notes
 - Configuration values are never logged. The Debug dumps print names only, with values shown as `<redacted>`.
 - `Materialize` persists every value, including ones that came from the environment or CLI. Mark secrets with `DisablePersistence`: they are saved as `"no persistence"`, and the in-memory value stays usable.
-- jsto writes the config file atomically with `0600` permissions: a temp file in the same directory is renamed over it, so that directory must be writable. A symlinked config path is written through (the link is kept); the file's owner becomes the writing user. On Windows `0600` does not restrict readers, so keep the file in a private directory.
-- jsto parse errors report only a byte offset, never file content.
+- jsto writes the config file atomically with `0600` permissions: a temp file in the same directory is renamed over it, so that directory must be writable, and the file's owner becomes the writing user. On Windows `0600` does not restrict readers, so keep the file in a private directory.
+- `jsto.Save` refuses (`ErrNotRegularFile`) a config path that is a symlink, directory, device or FIFO. Following a link would let one planted in a shared directory such as `/tmp` redirect the write (e.g. to `~/.bashrc`), and replacing `/dev/null` would break the system. Point `jsto.New` at the real file instead. `Load` still reads through links, with the kernel's usual symlink protections.
+- jsto parse errors report only a byte offset, never file content. The CLI dump prints only flags Transporter knows; values, positionals and unknown flags appear as `<redacted>`.
 - `jsto.Save` rewrites the whole file with only the pattern's keys. Other keys in the file are dropped.
 
 ## Logging Interoperability
