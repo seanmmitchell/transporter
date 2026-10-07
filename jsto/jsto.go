@@ -1,6 +1,7 @@
 // Package jsto stores a transporter Pattern as a JSON file. Use New(path) as
 // transporter.Options.ConfigFileEngine. Files are written atomically with
-// mode 0600, and only regular files are read or written.
+// mode 0600. Load and Save refuse paths that are not regular files, and Load
+// reads at most 16 MiB.
 package jsto
 
 import (
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -21,14 +23,21 @@ import (
 var (
 	// ErrInvalidJSON is wrapped by Load errors for files that are not a valid JSON object.
 	ErrInvalidJSON = errors.New("jsto: invalid JSON")
-	// ErrNotRegularFile is returned when FilePath exists but is not a regular
-	// file: by Save for a symlink, directory, device or FIFO, and by Load for
-	// anything that does not resolve to a regular file (a FIFO would block).
+	// ErrNotRegularFile is returned when the config path is not a regular
+	// file: by Save for a symlink, directory, device or FIFO at FilePath, and
+	// by Load when FilePath, after following links, is a directory, device or
+	// FIFO. Load checks the file it opened, so a swap after the check is still
+	// caught. A dangling link is reported as missing (fs.ErrNotExist).
 	ErrNotRegularFile = errors.New("jsto: config path is not a regular file")
 
 	errEmptyPath  = errors.New("jsto: FilePath is empty")
 	errNilPattern = errors.New("jsto: cannot save a nil pattern")
 )
+
+// maxConfigBytes caps how much Load reads. Some files report as regular with
+// size 0 yet never end (e.g. /proc/self/pagemap), so size alone can't be
+// trusted. A var so tests can lower it.
+var maxConfigBytes int64 = 16 << 20
 
 // JSONConfig stores a pattern as a JSON file. The zero value is usable once
 // FilePath is set; it must not be copied after first use.
@@ -59,21 +68,27 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 	}
 
 	// Only read regular files (following links, as reading always has): a FIFO
-	// would block forever and a device could be read without end.
+	// would block forever and a device could be read without end. Checking
+	// before opening avoids opening device nodes at all; readRegularFile
+	// checks again on the opened file.
 	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
 		le.Log(ale.Error, fmt.Sprintf("\t==> JSON file path %q is not a regular file.", path))
 		return nil, fmt.Errorf("%w: %q", ErrNotRegularFile, path)
 	}
 
 	le.Log(ale.Verbose, "Reading JSON File...")
-	allBytes, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			le.Log(ale.Info, fmt.Sprintf("JSON File %q does not exist.", path))
-		} else {
-			le.Log(ale.Error, fmt.Sprintf("\t==> Failed to read JSON file. Error: %q", err))
-		}
+	allBytes, err := readRegularFile(path)
+	switch {
+	case err == nil:
+	case errors.Is(err, fs.ErrNotExist):
+		le.Log(ale.Info, fmt.Sprintf("JSON File %q does not exist.", path))
 		// The os error already names the path.
+		return nil, fmt.Errorf("jsto: reading config: %w", err)
+	case errors.Is(err, ErrNotRegularFile):
+		le.Log(ale.Error, fmt.Sprintf("\t==> JSON file path %q is not a regular file.", path))
+		return nil, err
+	default:
+		le.Log(ale.Error, fmt.Sprintf("\t==> Failed to read JSON file. Error: %q", err))
 		return nil, fmt.Errorf("jsto: reading config: %w", err)
 	}
 	le.Log(ale.Verbose, "JSON File Read.")
@@ -147,6 +162,35 @@ func (conf *JSONConfig) Save(le *ale.LogEngine, pattern *transporter.Pattern) er
 
 	le.Log(ale.Info, "JSON File Saved.")
 	return nil
+}
+
+// readRegularFile reads path through a single open: the type check runs on
+// the opened file, so a FIFO or device swapped in after Load's pre-check is
+// still refused (openForRead does not block on a FIFO), and at most
+// maxConfigBytes are read.
+func readRegularFile(path string) ([]byte, error) {
+	f, err := openForRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %q", ErrNotRegularFile, path)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxConfigBytes {
+		return nil, fmt.Errorf("%q is larger than %d bytes", path, maxConfigBytes)
+	}
+	return data, nil
 }
 
 // writeFileAtomic writes data to a 0600 temporary file beside path, flushes it

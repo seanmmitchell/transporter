@@ -1,4 +1,6 @@
-//go:build unix
+//go:build linux || darwin || freebsd || netbsd || openbsd || dragonfly
+
+// (syscall.Mkfifo exists only on these; plain "unix" also covers solaris and aix.)
 
 package jsto_test
 

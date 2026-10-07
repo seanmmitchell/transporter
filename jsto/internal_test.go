@@ -3,6 +3,7 @@ package jsto
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +31,22 @@ func TestWriteFileAtomicRemovesTempFileOnFailure(t *testing.T) {
 	}
 	if len(leftovers) != 0 {
 		t.Fatalf("temporary files left behind: %v", leftovers)
+	}
+}
+
+// Files such as /proc/self/pagemap report as regular with size 0 but never
+// end, so Load must stop reading at maxConfigBytes.
+func TestLoadCapsReadSize(t *testing.T) {
+	orig := maxConfigBytes
+	maxConfigBytes = 8
+	t.Cleanup(func() { maxConfigBytes = orig })
+
+	path := filepath.Join(t.TempDir(), "conf.json")
+	if err := os.WriteFile(path, []byte(`{"a": {"Value": "12345"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := New(path).Load(nil)
+	if err == nil || !strings.Contains(err.Error(), "larger than 8 bytes") {
+		t.Fatalf("Load of a file over the cap: data %v, err %v; want a size error", data, err)
 	}
 }
