@@ -115,9 +115,9 @@ func (s *stubConfig) Save(le *ale.LogEngine, p *transporter.Pattern) error {
 
 // baseOptions isolates Energize from the real process (no args, no environment,
 // no config file) and captures all logs at Debug.
-func baseOptions() (transporter.TransporterOptions, *logCapture) {
+func baseOptions() (transporter.Options, *logCapture) {
 	le, logs := newCaptureEngine()
-	return transporter.TransporterOptions{
+	return transporter.Options{
 		LogEngine:         le,
 		EnvironmentPrefix: transporter.DefaultEnvironmentPrefix,
 		Args:              []string{},
@@ -125,7 +125,7 @@ func baseOptions() (transporter.TransporterOptions, *logCapture) {
 	}, logs
 }
 
-func energize(t *testing.T, p transporter.Pattern, o transporter.TransporterOptions) *transporter.State {
+func energize(t *testing.T, p transporter.Pattern, o transporter.Options) *transporter.State {
 	t.Helper()
 	s, err := transporter.Energize(p, o)
 	if err != nil {
@@ -204,8 +204,8 @@ func TestLifecycle(t *testing.T) {
 
 	// Edit the file out of band.
 	cfg := readConfigFile(t, path)
-	if got := cfg[keyLast]["Value"]; got != transporter.CONF_DisablePersistence_Phrase {
-		t.Errorf("saved %s Value = %v, want %q", keyLast, got, transporter.CONF_DisablePersistence_Phrase)
+	if got := cfg[keyLast]["Value"]; got != transporter.DisablePersistencePhrase {
+		t.Errorf("saved %s Value = %v, want %q", keyLast, got, transporter.DisablePersistencePhrase)
 	}
 	if cfg[keyAge] == nil {
 		t.Fatalf("saved config has no %q entry: %v", keyAge, cfg)
@@ -276,8 +276,8 @@ func TestMaterializeKeepsInMemoryValues(t *testing.T) {
 
 	wantValue(t, s, keyLast, "secret-last")
 	cfg := readConfigFile(t, path)
-	if got := cfg[keyLast]["Value"]; got != transporter.CONF_DisablePersistence_Phrase {
-		t.Errorf("saved %s Value = %v, want %q", keyLast, got, transporter.CONF_DisablePersistence_Phrase)
+	if got := cfg[keyLast]["Value"]; got != transporter.DisablePersistencePhrase {
+		t.Errorf("saved %s Value = %v, want %q", keyLast, got, transporter.DisablePersistencePhrase)
 	}
 	if got := cfg[keyFirst]["Value"]; got != "sean" {
 		t.Errorf("saved %s Value = %v, want %q", keyFirst, got, "sean")
@@ -299,7 +299,7 @@ func TestConfigFileLogEngineOnly(t *testing.T) {
 	stub := &stubConfig{loadData: map[string]any{
 		keyAge: map[string]any{"DisablePersistence": false, "Value": "40"},
 	}}
-	o := transporter.TransporterOptions{ // LogEngine deliberately nil
+	o := transporter.Options{ // LogEngine deliberately nil
 		ConfigFileLogEngine: cfgLE,
 		ConfigFileEngine:    stub,
 		EnvironmentPrefix:   transporter.DefaultEnvironmentPrefix,
@@ -738,6 +738,87 @@ func TestConcurrentGetSet(t *testing.T) {
 		t.Fatalf("Set: %v", err)
 	}
 	wantValue(t, s, keyFirst, "final")
+}
+
+// Concurrent Sets on different keys each publish a modified copy; without the
+// CompareAndSwap retry one would overwrite another's update with a stale copy.
+func TestConcurrentSetDifferentKeys(t *testing.T) {
+	const workers, iterations = 8, 200
+	seqs := map[string]transporter.PatternSequence{}
+	for w := 0; w < workers; w++ {
+		seqs[fmt.Sprintf("k%d", w)] = transporter.PatternSequence{}
+	}
+	o, _ := baseOptions()
+	s := energize(t, transporter.Pattern{Sequences: seqs}, o)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if err := s.Set(fmt.Sprintf("k%d", w), fmt.Sprint(i)); err != nil {
+					t.Errorf("Set: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for w := 0; w < workers; w++ {
+		wantValue(t, s, fmt.Sprintf("k%d", w), fmt.Sprint(iterations-1))
+	}
+}
+
+// captureStdout returns what f prints to os.Stdout, where the default
+// console engine writes.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+	out := make(chan string)
+	go func() {
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(r)
+		out <- b.String()
+	}()
+	f()
+	w.Close()
+	return <-out
+}
+
+func TestDefaultLoggerIsWarning(t *testing.T) {
+	o, _ := baseOptions()
+	o.LogEngine = nil // use the default console engine
+	o.Environ = []string{"T_UNMATCHED=x"}
+	printed := captureStdout(t, func() { energize(t, newPattern(), o) })
+
+	if !strings.Contains(printed, `"T_UNMATCHED"`) {
+		t.Errorf("default engine did not print the Warning; got:\n%s", printed)
+	}
+	if strings.Contains(printed, "Energizing...") {
+		t.Errorf("default engine printed an Info message; got:\n%s", printed)
+	}
+}
+
+// ale does not sanitize messages, so identifiers must be %q-quoted or a
+// crafted name could forge log lines.
+func TestLogInjectionQuoted(t *testing.T) {
+	o, logs := baseOptions()
+	o.Environ = []string{"T_X\nFAKE LOG LINE=1"}
+	o.Args = []string{"--f\nFAKE LOG LINE", "v"}
+	energize(t, newPattern(), o)
+
+	for _, m := range logs.messages() {
+		if strings.Contains(m, "\nFAKE") {
+			t.Errorf("unquoted identifier in log message: %q", m)
+		}
+	}
 }
 
 // #endregion Regression tests

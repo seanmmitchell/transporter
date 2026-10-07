@@ -1,3 +1,10 @@
+// Package transporter collects a program's settings from a JSON config file,
+// prefixed environment variables and command-line flags into one State.
+//
+// Describe each setting as a PatternSequence, call Energize to load the
+// sources (config file < environment < CLI, later sources win), then read
+// and change values with State.Get and State.Set and save them with
+// State.Materialize. Values are never logged.
 package transporter
 
 import (
@@ -16,29 +23,55 @@ import (
 	"github.com/seanmmitchell/ale/v2/pconsole"
 )
 
+// Errors returned by this package, wrapped with context; test with errors.Is.
 var (
-	ErrKeyNotFound         = errors.New("transporter: key does not exist")
-	ErrNoConfigFileEngine  = errors.New("transporter: no config file engine configured")
+	// ErrKeyNotFound is returned by Get and Set for a key not in the pattern.
+	ErrKeyNotFound = errors.New("transporter: key does not exist")
+	// ErrNoConfigFileEngine is returned by Materialize when Options.ConfigFileEngine is nil.
+	ErrNoConfigFileEngine = errors.New("transporter: no config file engine configured")
+	// ErrDuplicateIdentifier is returned by Energize when a key, CLI flag or
+	// environment name belongs to more than one sequence within one source.
 	ErrDuplicateIdentifier = errors.New("transporter: duplicate key/flag/env identifier")
-	ErrInvalidIdentifier   = errors.New("transporter: invalid flag/env identifier")
-	ErrRequiredMissing     = errors.New("transporter: required value missing")
+	// ErrInvalidIdentifier is returned by Energize for a CLI flag or
+	// environment name that could never match (empty, containing "=", or a
+	// flag starting with "-").
+	ErrInvalidIdentifier = errors.New("transporter: invalid flag/env identifier")
+	// ErrRequiredMissing is returned by Energize when a Required sequence has
+	// no value after all sources are loaded.
+	ErrRequiredMissing = errors.New("transporter: required value missing")
 )
 
+// PatternSequence describes one setting: where its value may come from and
+// how it is persisted. Its key in Pattern.Sequences names it.
 type PatternSequence struct {
-	Name               string   `json:"Name"`
-	Description        string   `json:"Description"`
-	Example            string   `json:"-"`
-	Required           bool     `json:"Required"`
-	DisablePersistence bool     `json:"DisablePersistence"`
-	ENVVars            []string `json:"-"`
-	CLIFlags           []string `json:"-"`
-	Value              string   `json:"Value"`
+	// Name and Description document the setting; they are saved with it.
+	Name        string `json:"Name"`
+	Description string `json:"Description"`
+	// Example documents a sample value; it is not saved.
+	Example string `json:"-"`
+	// Required makes Energize fail with ErrRequiredMissing when Value is
+	// still empty after loading.
+	Required bool `json:"Required"`
+	// DisablePersistence keeps the value out of the config file: Materialize
+	// saves DisablePersistencePhrase instead, and loading skips the entry.
+	DisablePersistence bool `json:"DisablePersistence"`
+	// ENVVars are environment variable names, without the prefix, that set
+	// this sequence. The sequence key also works.
+	ENVVars []string `json:"-"`
+	// CLIFlags are flag names, without leading dashes, that set this
+	// sequence. The sequence key also works.
+	CLIFlags []string `json:"-"`
+	// Value is the default before Energize and the current value after.
+	Value string `json:"Value"`
 }
 
+// Pattern is the full set of settings, keyed by sequence key.
 type Pattern struct {
 	Sequences map[string]PatternSequence
 }
 
+// State holds the loaded values. Obtain one from Energize; the zero value is
+// not usable. A State is safe for concurrent use.
 type State struct {
 	// active is replaced, never modified, once published.
 	active atomic.Pointer[Pattern]
@@ -47,46 +80,58 @@ type State struct {
 
 	logEngine          *ale.LogEngine
 	configLogEngine    *ale.LogEngine
-	transporterOptions TransporterOptions
+	transporterOptions Options
 }
 
-type TransporterOptions struct {
-	//// Logging
-	// LogEngine defaults to an engine that emits Warning and above to the console.
-	LogEngine            *ale.LogEngine
+// Options configures Energize. The zero value is usable.
+type Options struct {
+	// LogEngine receives Transporter's logs. When nil, a console engine that
+	// emits Warning and above is created.
+	LogEngine *ale.LogEngine
+	// LogEnginePConsoleCTX is used only to build the default LogEngine.
 	LogEnginePConsoleCTX *pconsole.PConsoleCTX
 
-	//// Loading
-	// Environment: only variables carrying this prefix are read. Defaults to DefaultEnvironmentPrefix.
+	// EnvironmentPrefix limits which environment variables are read.
+	// Empty means DefaultEnvironmentPrefix.
 	EnvironmentPrefix string
-	// Environ defaults to os.Environ().
+	// Environ lists "NAME=value" entries to read. Nil means os.Environ();
+	// use an empty slice for none.
 	Environ []string
-	// CLI: Args defaults to os.Args[1:].
+	// Args lists the CLI arguments to parse. Nil means os.Args[1:]; use an
+	// empty slice for none.
 	Args []string
-	// ConfigFile (jsto): ConfigFileLogEngine defaults to the transporter log engine.
-	ConfigFileLogEngine *ale.LogEngine
-	ConfigFileEngine    ConfigFileInterface
 
-	//// Dev / Debug
+	// ConfigFileLogEngine receives the config file engine's logs. Nil means LogEngine.
+	ConfigFileLogEngine *ale.LogEngine
+	// ConfigFileEngine loads and saves the config file, e.g. jsto.New(path).
+	// Nil disables the config file.
+	ConfigFileEngine ConfigFileInterface
+
+	// DumpEnvironmentVariables and DumpCLIArguments log the names of the
+	// prefixed variables and the parsed CLI flags at Debug level, with every
+	// value redacted. They need a LogEngine with a Debug pipeline.
 	DumpEnvironmentVariables bool
 	DumpCLIArguments         bool
 }
 
 // ConfigFileInterface persists patterns. Load must return an error wrapping
-// fs.ErrNotExist when the backing file does not exist.
+// fs.ErrNotExist when the backing file does not exist. Save must not call
+// State.Materialize, which would deadlock.
 type ConfigFileInterface interface {
 	Load(le *ale.LogEngine) (map[string]interface{}, error)
 	Save(le *ale.LogEngine, pattern *Pattern) error
 }
 
+// DefaultEnvironmentPrefix is used when Options.EnvironmentPrefix is empty.
 const DefaultEnvironmentPrefix = "T_"
 
-const CONF_DisablePersistence_Phrase = "no persistence"
+// DisablePersistencePhrase is saved in place of a DisablePersistence value.
+const DisablePersistencePhrase = "no persistence"
 
 // Energize fills a copy of pattern from the config file, the environment and
 // the CLI, in that order, with later sources overriding earlier ones.
 // Values are never logged.
-func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
+func Energize(pattern Pattern, tOpts Options) (*State, error) {
 	// Work on a copy so the caller's pattern is never mutated.
 	pattern = clonePattern(pattern)
 
@@ -241,7 +286,7 @@ func Energize(pattern Pattern, tOpts TransporterOptions) (*State, error) {
 }
 
 // Materialize saves the active pattern through the config file engine.
-// DisablePersistence values are replaced by CONF_DisablePersistence_Phrase in
+// DisablePersistence values are replaced by DisablePersistencePhrase in
 // the saved copy only.
 func (state *State) Materialize() error {
 	if state.transporterOptions.ConfigFileEngine == nil {
@@ -254,7 +299,7 @@ func (state *State) Materialize() error {
 	snapshot := clonePattern(*state.active.Load())
 	for key, seq := range snapshot.Sequences {
 		if seq.DisablePersistence {
-			seq.Value = CONF_DisablePersistence_Phrase
+			seq.Value = DisablePersistencePhrase
 			snapshot.Sequences[key] = seq
 		}
 	}
@@ -265,6 +310,7 @@ func (state *State) Materialize() error {
 	return nil
 }
 
+// Get returns the current value for key, or an error wrapping ErrKeyNotFound.
 func (state *State) Get(key string) (string, error) {
 	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Getting value for key %q...", key))
 
@@ -278,6 +324,8 @@ func (state *State) Get(key string) (string, error) {
 	return seq.Value, nil
 }
 
+// Set changes the in-memory value for key, or returns an error wrapping
+// ErrKeyNotFound. Call Materialize to save it.
 func (state *State) Set(key string, value string) error {
 	state.logEngine.Log(ale.Verbose, fmt.Sprintf("Setting a new value for key %q...", key))
 
@@ -338,9 +386,6 @@ func loadConfig(le *ale.LogEngine, pattern *Pattern, confData map[string]interfa
 func buildIndex(pattern Pattern, kind string, badPrefix string, ids func(PatternSequence) []string) (map[string]string, error) {
 	index := make(map[string]string)
 	claim := func(id string, key string) error {
-		if id == "" {
-			return nil
-		}
 		if owner, ok := index[id]; ok && owner != key {
 			return fmt.Errorf("%w: %s %q is used by both %q and %q", ErrDuplicateIdentifier, kind, id, owner, key)
 		}
@@ -348,10 +393,11 @@ func buildIndex(pattern Pattern, kind string, badPrefix string, ids func(Pattern
 		return nil
 	}
 
+	// Keys are unique map keys, so they never collide with each other.
 	keys := sortedKeys(pattern.Sequences)
 	for _, key := range keys {
-		if err := claim(key, key); err != nil {
-			return nil, err
+		if key != "" {
+			index[key] = key
 		}
 	}
 	for _, key := range keys {
