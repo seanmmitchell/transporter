@@ -29,6 +29,8 @@ var (
 	// FIFO. Load checks the file it opened, so a swap after the check is still
 	// caught. A dangling link is reported as missing (fs.ErrNotExist).
 	ErrNotRegularFile = errors.New("jsto: config path is not a regular file")
+	// ErrFileTooLarge is returned by Load for a config file over 16 MiB.
+	ErrFileTooLarge = errors.New("jsto: config file too large")
 
 	errEmptyPath  = errors.New("jsto: FilePath is empty")
 	errNilPattern = errors.New("jsto: cannot save a nil pattern")
@@ -86,6 +88,9 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 		return nil, fmt.Errorf("jsto: reading config: %w", err)
 	case errors.Is(err, ErrNotRegularFile):
 		le.Log(ale.Error, fmt.Sprintf("\t==> JSON file path %q is not a regular file.", path))
+		return nil, err
+	case errors.Is(err, ErrFileTooLarge):
+		le.Log(ale.Error, fmt.Sprintf("\t==> JSON file %q is larger than %d bytes.", path, maxConfigBytes))
 		return nil, err
 	default:
 		le.Log(ale.Error, fmt.Sprintf("\t==> Failed to read JSON file. Error: %q", err))
@@ -182,13 +187,16 @@ func readRegularFile(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %q", ErrNotRegularFile, path)
 	}
+	if err := setBlocking(f); err != nil {
+		return nil, err
+	}
 
 	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(data)) > maxConfigBytes {
-		return nil, fmt.Errorf("%q is larger than %d bytes", path, maxConfigBytes)
+		return nil, fmt.Errorf("%w: %q is larger than %d bytes", ErrFileTooLarge, path, maxConfigBytes)
 	}
 	return data, nil
 }

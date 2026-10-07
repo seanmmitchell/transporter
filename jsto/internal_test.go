@@ -1,9 +1,9 @@
 package jsto
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -46,7 +46,7 @@ func TestLoadCapsReadSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, err := New(path).Load(nil)
-	if err == nil || !strings.Contains(err.Error(), "larger than 8 bytes") {
-		t.Fatalf("Load of a file over the cap: data %v, err %v; want a size error", data, err)
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("Load of a file over the cap: data %v, err %v; want ErrFileTooLarge", data, err)
 	}
 }
