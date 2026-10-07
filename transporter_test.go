@@ -693,8 +693,63 @@ func TestGetUnknownKey(t *testing.T) {
 	}
 }
 
-// TestConcurrentGetSet stays last: against a non-copy-on-write Set it can die
-// with a fatal concurrent map access, which would hide later tests' results.
+// captureStdout returns what f prints to os.Stdout, where the default console
+// engine writes. It swaps the process-wide os.Stdout, so tests using it must
+// not run in parallel.
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+	out := make(chan string, 1) // buffered: the reader never blocks if f fails the test
+	go func() {
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(r)
+		r.Close()
+		out <- b.String()
+	}()
+	func() {
+		defer w.Close() // also runs if f calls t.Fatal
+		f()
+	}()
+	return <-out
+}
+
+func TestDefaultLoggerIsWarning(t *testing.T) {
+	o, _ := baseOptions()
+	o.LogEngine = nil // use the default console engine
+	o.Environ = []string{"T_UNMATCHED=x"}
+	printed := captureStdout(t, func() { energize(t, newPattern(), o) })
+
+	if !strings.Contains(printed, `"T_UNMATCHED"`) {
+		t.Errorf("default engine did not print the Warning; got:\n%s", printed)
+	}
+	if strings.Contains(printed, "Energizing...") {
+		t.Errorf("default engine printed an Info message; got:\n%s", printed)
+	}
+}
+
+// ale does not sanitize messages, so identifiers must be %q-quoted or a
+// crafted name could forge log lines.
+func TestLogInjectionQuoted(t *testing.T) {
+	o, logs := baseOptions()
+	o.Environ = []string{"T_X\nFAKE LOG LINE=1"}
+	o.Args = []string{"--f\nFAKE LOG LINE", "v"}
+	energize(t, newPattern(), o)
+
+	for _, m := range logs.messages() {
+		if strings.Contains(m, "\nFAKE") {
+			t.Errorf("unquoted identifier in log message: %q", m)
+		}
+	}
+}
+
+// The concurrency tests stay last: against a non-copy-on-write Set they can
+// die with a fatal concurrent map access, which would hide later tests' results.
 func TestConcurrentGetSet(t *testing.T) {
 	o, _ := baseOptions()
 	o.ConfigFileEngine = &stubConfig{}
@@ -767,57 +822,6 @@ func TestConcurrentSetDifferentKeys(t *testing.T) {
 	wg.Wait()
 	for w := 0; w < workers; w++ {
 		wantValue(t, s, fmt.Sprintf("k%d", w), fmt.Sprint(iterations-1))
-	}
-}
-
-// captureStdout returns what f prints to os.Stdout, where the default
-// console engine writes.
-func captureStdout(t *testing.T, f func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	orig := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = orig }()
-	out := make(chan string)
-	go func() {
-		var b bytes.Buffer
-		_, _ = b.ReadFrom(r)
-		out <- b.String()
-	}()
-	f()
-	w.Close()
-	return <-out
-}
-
-func TestDefaultLoggerIsWarning(t *testing.T) {
-	o, _ := baseOptions()
-	o.LogEngine = nil // use the default console engine
-	o.Environ = []string{"T_UNMATCHED=x"}
-	printed := captureStdout(t, func() { energize(t, newPattern(), o) })
-
-	if !strings.Contains(printed, `"T_UNMATCHED"`) {
-		t.Errorf("default engine did not print the Warning; got:\n%s", printed)
-	}
-	if strings.Contains(printed, "Energizing...") {
-		t.Errorf("default engine printed an Info message; got:\n%s", printed)
-	}
-}
-
-// ale does not sanitize messages, so identifiers must be %q-quoted or a
-// crafted name could forge log lines.
-func TestLogInjectionQuoted(t *testing.T) {
-	o, logs := baseOptions()
-	o.Environ = []string{"T_X\nFAKE LOG LINE=1"}
-	o.Args = []string{"--f\nFAKE LOG LINE", "v"}
-	energize(t, newPattern(), o)
-
-	for _, m := range logs.messages() {
-		if strings.Contains(m, "\nFAKE") {
-			t.Errorf("unquoted identifier in log message: %q", m)
-		}
 	}
 }
 

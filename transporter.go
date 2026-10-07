@@ -56,12 +56,13 @@ type PatternSequence struct {
 	// saves DisablePersistencePhrase instead, and loading skips the entry.
 	DisablePersistence bool `json:"DisablePersistence"`
 	// ENVVars are environment variable names, without the prefix, that set
-	// this sequence. The sequence key also works.
+	// this sequence. A non-empty sequence key also works.
 	ENVVars []string `json:"-"`
 	// CLIFlags are flag names, without leading dashes, that set this
-	// sequence. The sequence key also works.
+	// sequence. A non-empty sequence key also works.
 	CLIFlags []string `json:"-"`
-	// Value is the default before Energize and the current value after.
+	// Value is the default. Energize works on a copy, so read the loaded
+	// value with State.Get.
 	Value string `json:"Value"`
 }
 
@@ -379,8 +380,9 @@ func loadConfig(le *ale.LogEngine, pattern *Pattern, confData map[string]interfa
 	}
 }
 
-// buildIndex maps every sequence key and every identifier returned by ids to
-// its sequence key. An identifier claimed by two sequences is an error, as is
+// buildIndex maps every sequence key (except an empty one) and every
+// identifier returned by ids to its sequence key. An identifier claimed by
+// two sequences is an error, as is
 // one that could never match: empty, containing "=" or, when badPrefix is set,
 // starting with it.
 func buildIndex(pattern Pattern, kind string, badPrefix string, ids func(PatternSequence) []string) (map[string]string, error) {
