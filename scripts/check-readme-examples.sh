@@ -4,6 +4,10 @@
 # Each block must be a complete `package main` program.
 set -euo pipefail
 
+# Ignore any go.work in a parent of the temp dir (or GOWORK in the caller's
+# environment): the examples must build as their own module.
+export GOWORK=off
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

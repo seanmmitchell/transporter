@@ -7,20 +7,22 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/seanmmitchell/transporter/v2/jsto"
 )
 
-var (
-	// sanitizedParseError matches every error Load returns for bad JSON; none
-	// of these forms can carry file content.
-	sanitizedParseError = regexp.MustCompile(`^jsto: parsing ".*": jsto: invalid JSON: ` +
+// jsonErrorWording matches encoding/json error text, which quotes input.
+var jsonErrorWording = regexp.MustCompile(`invalid character|cannot unmarshal|unexpected end of JSON`)
+
+// sanitizedParseError matches every error Load returns for bad JSON at path;
+// none of these forms can carry file content.
+func sanitizedParseError(path string) *regexp.Regexp {
+	return regexp.MustCompile(`^jsto: parsing ` + regexp.QuoteMeta(strconv.Quote(path)) + `: jsto: invalid JSON: ` +
 		`(invalid JSON at byte offset \d+|top-level JSON value must be an object|unsupported value at byte offset \d+|invalid JSON)$`)
-	// jsonErrorWording matches encoding/json error text, which quotes input.
-	jsonErrorWording = regexp.MustCompile(`invalid character|cannot unmarshal|unexpected end of JSON`)
-)
+}
 
 // FuzzLoad feeds arbitrary bytes to Load. Invariants: exactly one of data or
 // error; errors wrap ErrInvalidJSON (or ErrFileTooLarge past 16 MiB); Load
@@ -41,6 +43,7 @@ func FuzzLoad(f *testing.F) {
 	// One file per fuzzing process, rewritten each run: a fresh t.TempDir per
 	// input made each execution slow.
 	path := filepath.Join(f.TempDir(), "conf.json")
+	wantParseError := sanitizedParseError(path)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -72,7 +75,7 @@ func FuzzLoad(f *testing.F) {
 			}
 			// encoding/json's own messages quote input bytes or number
 			// literals, so the error must be one of the sanitized forms.
-			if !sanitizedParseError.MatchString(err.Error()) {
+			if !wantParseError.MatchString(err.Error()) || strings.Contains(err.Error(), "Zq9") {
 				t.Fatalf("parse error is not one of the sanitized forms (may carry file content): %v", err)
 			}
 		} else if !blank && jsonErr != nil {
