@@ -98,7 +98,9 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 	}
 	le.Log(ale.Verbose, "JSON File Read.")
 
-	if len(bytes.TrimSpace(allBytes)) == 0 {
+	// Only JSON whitespace counts as blank; bytes.TrimSpace would also accept
+	// Unicode spaces such as U+00A0, which are invalid JSON.
+	if len(bytes.Trim(allBytes, " \t\r\n")) == 0 {
 		le.Log(ale.Info, "JSON File is empty.")
 		return map[string]interface{}{}, nil
 	}

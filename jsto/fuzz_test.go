@@ -1,0 +1,66 @@
+package jsto_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/seanmmitchell/transporter/v2/jsto"
+)
+
+// FuzzLoad feeds arbitrary bytes to Load. Invariants: exactly one of data or
+// error; errors wrap ErrInvalidJSON; Load agrees with encoding/json on what is
+// valid; and file content (marked with "Zq9") never reaches the returned error
+// or the logs.
+func FuzzLoad(f *testing.F) {
+	f.Add([]byte(`{"token": {"Value": "Zq9"}}`))
+	f.Add([]byte(`{"token": {"Value": tZq9}}`))
+	f.Add([]byte(`Zq9`))
+	f.Add([]byte(`{"x": {"Value": 1e999}}`))
+	f.Add([]byte(""))
+	f.Add([]byte(" \n\t"))
+	f.Add([]byte(" "))
+	f.Add([]byte(`null`))
+	f.Add([]byte(`[1, 2]`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		path := filepath.Join(t.TempDir(), "conf.json")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		le, logs := testLogger(t)
+		got, err := jsto.New(path).Load(le)
+
+		if (err == nil) == (got == nil) {
+			t.Fatalf("Load returned data %v and error %v; want exactly one", got, err)
+		}
+
+		var m map[string]interface{}
+		jsonErr := json.Unmarshal(data, &m)
+		blank := len(bytes.Trim(data, " \t\r\n")) == 0
+
+		if err != nil {
+			if !errors.Is(err, jsto.ErrInvalidJSON) {
+				t.Fatalf("Load error %v does not wrap ErrInvalidJSON", err)
+			}
+			if blank || jsonErr == nil {
+				t.Fatalf("Load rejected input encoding/json accepts: %v", err)
+			}
+			if strings.Contains(err.Error(), "Zq9") {
+				t.Fatalf("file content leaked into the error: %v", err)
+			}
+		} else if !blank && jsonErr != nil {
+			t.Fatalf("Load accepted input encoding/json rejects (%v)", jsonErr)
+		}
+
+		for _, msg := range logs() {
+			if strings.Contains(msg, "Zq9") {
+				t.Fatalf("file content leaked into a log message: %q", msg)
+			}
+		}
+	})
+}
