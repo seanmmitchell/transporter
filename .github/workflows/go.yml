@@ -113,9 +113,9 @@ jobs:
 
       - name: fuzz (30s per target)
         run: |
-          go test -run '^$' -fuzz '^FuzzCLI$' -fuzztime 30s .
-          go test -run '^$' -fuzz '^FuzzIdentifiers$' -fuzztime 30s .
-          go test -run '^$' -fuzz '^FuzzLoad$' -fuzztime 30s ./jsto
+          go test -run '^$' -fuzz '^FuzzCLI$' -fuzztime 30s -fuzzminimizetime 5s .
+          go test -run '^$' -fuzz '^FuzzIdentifiers$' -fuzztime 30s -fuzzminimizetime 5s .
+          go test -run '^$' -fuzz '^FuzzLoad$' -fuzztime 30s -fuzzminimizetime 5s ./jsto
 
       # A failing input is written under testdata/fuzz; keep it so it can be
       # reproduced locally with `go test -run <FuzzTarget>/<id>`.
@@ -128,6 +128,7 @@ jobs:
             testdata/fuzz
             jsto/testdata/fuzz
           if-no-files-found: ignore
+          retention-days: 7
 
   govulncheck:
     runs-on: ubuntu-latest

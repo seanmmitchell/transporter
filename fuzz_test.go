@@ -54,6 +54,16 @@ func FuzzCLI(f *testing.F) {
 		}
 
 		s, msgs := energizeWith(args)
+		// Only fixed flag names, env names and argument indexes may be logged,
+		// so the marker in any message means some value leaked (including
+		// values later overridden, which Get no longer returns).
+		if checkLeaks {
+			for _, m := range msgs {
+				if strings.Contains(m, fuzzMarker) {
+					t.Fatalf("a value leaked into a log message: %q", m)
+				}
+			}
+		}
 		values := map[string]string{}
 		for _, key := range []string{keyFirst, keyLast, keyAge} {
 			v, err := s.Get(key)
@@ -61,13 +71,6 @@ func FuzzCLI(f *testing.F) {
 				t.Fatalf("Get(%q): %v", key, err)
 			}
 			values[key] = v
-			if checkLeaks && strings.Contains(v, fuzzMarker) {
-				for _, m := range msgs {
-					if strings.Contains(m, v) {
-						t.Fatalf("value %q of %q leaked into a log message: %q", v, key, m)
-					}
-				}
-			}
 		}
 
 		// Everything after the first "--" is ignored.
@@ -85,15 +88,18 @@ func FuzzCLI(f *testing.F) {
 	})
 }
 
-// FuzzIdentifiers checks that Energize either rejects an identifier with a
-// sentinel error or accepts it and lets it set the sequence from the CLI
-// (which overrides the environment).
+// FuzzIdentifiers checks Energize's identifier rules against an independent
+// model: invalid or colliding identifiers are rejected with the matching
+// sentinel error, and valid ones are accepted and let the CLI set the sequence
+// (overriding the environment).
 func FuzzIdentifiers(f *testing.F) {
 	f.Add("port", "p", "PORT")
 	f.Add("a", "a", "A")
 	f.Add("", "-x", "B=1")
 	f.Add("user-age", "user-age", "")
 	f.Add("k", "o", "OTHER")
+	f.Add("o", "x", "X")
+	f.Add("OTHER", "x", "X")
 
 	f.Fuzz(func(t *testing.T, key, flag, env string) {
 		if key == "other" {
@@ -107,15 +113,30 @@ func FuzzIdentifiers(f *testing.F) {
 		o.Args = []string{"--" + flag, "from-cli"}
 		o.Environ = []string{transporter.DefaultEnvironmentPrefix + env + "=from-env"}
 
+		// The model. CLI names: keys plus CLIFlags; ENV names: keys plus
+		// ENVVars; "other" owns "other", "o" (CLI) and "OTHER" (ENV).
+		invalid := flag == "" || strings.Contains(flag, "=") || strings.HasPrefix(flag, "-") ||
+			env == "" || strings.Contains(env, "=")
+		duplicate := flag == "o" || flag == "other" || env == "OTHER" || env == "other" ||
+			key == "o" || key == "OTHER"
+
 		s, err := transporter.Energize(p, o)
-		if err != nil {
-			if !errors.Is(err, transporter.ErrDuplicateIdentifier) && !errors.Is(err, transporter.ErrInvalidIdentifier) {
-				t.Fatalf("Energize: unexpected error %v", err)
+		switch {
+		case invalid:
+			if !errors.Is(err, transporter.ErrInvalidIdentifier) && !(duplicate && errors.Is(err, transporter.ErrDuplicateIdentifier)) {
+				t.Fatalf("invalid identifier (flag %q, env %q): err = %v, want ErrInvalidIdentifier", flag, env, err)
 			}
-			return
-		}
-		if got, err := s.Get(key); err != nil || got != "from-cli" {
-			t.Fatalf("accepted flag %q did not set %q: got %q, %v", flag, key, got, err)
+		case duplicate:
+			if !errors.Is(err, transporter.ErrDuplicateIdentifier) {
+				t.Fatalf("colliding identifier (key %q, flag %q, env %q): err = %v, want ErrDuplicateIdentifier", key, flag, env, err)
+			}
+		default:
+			if err != nil {
+				t.Fatalf("valid identifiers (key %q, flag %q, env %q) rejected: %v", key, flag, env, err)
+			}
+			if got, err := s.Get(key); err != nil || got != "from-cli" {
+				t.Fatalf("flag %q did not set %q: got %q, %v", flag, key, got, err)
+			}
 		}
 	})
 }

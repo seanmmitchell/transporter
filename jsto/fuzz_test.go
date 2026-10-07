@@ -13,22 +13,26 @@ import (
 )
 
 // FuzzLoad feeds arbitrary bytes to Load. Invariants: exactly one of data or
-// error; errors wrap ErrInvalidJSON; Load agrees with encoding/json on what is
-// valid; and file content (marked with "Zq9") never reaches the returned error
-// or the logs.
+// error; errors wrap ErrInvalidJSON (or ErrFileTooLarge past 16 MiB); Load
+// agrees with encoding/json on what is valid; and file content (marked with
+// "Zq9") never reaches the returned error or the logs.
 func FuzzLoad(f *testing.F) {
 	f.Add([]byte(`{"token": {"Value": "Zq9"}}`))
 	f.Add([]byte(`{"token": {"Value": tZq9}}`))
 	f.Add([]byte(`Zq9`))
 	f.Add([]byte(`{"x": {"Value": 1e999}}`))
 	f.Add([]byte(""))
-	f.Add([]byte(" \n\t"))
-	f.Add([]byte(" "))
+	f.Add([]byte(" \n\t\r"))
+	f.Add([]byte(" ")) // Unicode space: not JSON whitespace, so invalid
+	f.Add([]byte("\v\f"))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`[1, 2]`))
 
+	// One file per fuzzing process, rewritten each run: a fresh t.TempDir per
+	// input made each execution slow.
+	path := filepath.Join(f.TempDir(), "conf.json")
+
 	f.Fuzz(func(t *testing.T, data []byte) {
-		path := filepath.Join(t.TempDir(), "conf.json")
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -37,6 +41,12 @@ func FuzzLoad(f *testing.F) {
 
 		if (err == nil) == (got == nil) {
 			t.Fatalf("Load returned data %v and error %v; want exactly one", got, err)
+		}
+		if len(data) > 16<<20 {
+			if !errors.Is(err, jsto.ErrFileTooLarge) {
+				t.Fatalf("Load of %d bytes: err = %v, want ErrFileTooLarge", len(data), err)
+			}
+			return
 		}
 
 		var m map[string]interface{}

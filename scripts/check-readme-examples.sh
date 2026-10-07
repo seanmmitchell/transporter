@@ -20,7 +20,7 @@ if [ "$count" -eq 0 ]; then
 	exit 1
 fi
 
-printf 'module readmeexamples\n\ngo 1.22\n\nrequire github.com/seanmmitchell/transporter/v2 v2.0.0\n\nreplace github.com/seanmmitchell/transporter/v2 => %s\n' "$root" > "$work/go.mod"
+printf 'module readmeexamples\n\ngo 1.22\n\nrequire github.com/seanmmitchell/transporter/v2 v2.0.0\n\nreplace github.com/seanmmitchell/transporter/v2 => \"%s\"\n' "$root" > "$work/go.mod"
 
 cd "$work"
 go mod tidy

@@ -55,8 +55,9 @@ func New(path string) *JSONConfig {
 }
 
 // Load reads and decodes the JSON file at FilePath. If the file does not exist
-// the returned error wraps fs.ErrNotExist. An empty or whitespace-only file
-// yields an empty map. File contents are never logged.
+// the returned error wraps fs.ErrNotExist. An empty file, or one holding only
+// JSON whitespace (space, tab, CR, LF), yields an empty map; any other
+// non-JSON content wraps ErrInvalidJSON. File contents are never logged.
 func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) {
 	conf.mu.Lock()
 	defer conf.mu.Unlock()
