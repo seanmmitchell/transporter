@@ -6,10 +6,20 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/seanmmitchell/transporter/v2/jsto"
+)
+
+var (
+	// sanitizedParseError matches every error Load returns for bad JSON; none
+	// of these forms can carry file content.
+	sanitizedParseError = regexp.MustCompile(`^jsto: parsing ".*": jsto: invalid JSON: ` +
+		`(invalid JSON at byte offset \d+|top-level JSON value must be an object|unsupported value at byte offset \d+|invalid JSON)$`)
+	// jsonErrorWording matches encoding/json error text, which quotes input.
+	jsonErrorWording = regexp.MustCompile(`invalid character|cannot unmarshal|unexpected end of JSON`)
 )
 
 // FuzzLoad feeds arbitrary bytes to Load. Invariants: exactly one of data or
@@ -23,7 +33,7 @@ func FuzzLoad(f *testing.F) {
 	f.Add([]byte(`{"x": {"Value": 1e999}}`))
 	f.Add([]byte(""))
 	f.Add([]byte(" \n\t\r"))
-	f.Add([]byte(" ")) // Unicode space: not JSON whitespace, so invalid
+	f.Add([]byte("\u00a0")) // Unicode space: not JSON whitespace, so invalid
 	f.Add([]byte("\v\f"))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`[1, 2]`))
@@ -60,16 +70,18 @@ func FuzzLoad(f *testing.F) {
 			if blank || jsonErr == nil {
 				t.Fatalf("Load rejected input encoding/json accepts: %v", err)
 			}
-			if strings.Contains(err.Error(), "Zq9") {
-				t.Fatalf("file content leaked into the error: %v", err)
+			// encoding/json's own messages quote input bytes or number
+			// literals, so the error must be one of the sanitized forms.
+			if !sanitizedParseError.MatchString(err.Error()) {
+				t.Fatalf("parse error is not one of the sanitized forms (may carry file content): %v", err)
 			}
 		} else if !blank && jsonErr != nil {
 			t.Fatalf("Load accepted input encoding/json rejects (%v)", jsonErr)
 		}
 
 		for _, msg := range logs() {
-			if strings.Contains(msg, "Zq9") {
-				t.Fatalf("file content leaked into a log message: %q", msg)
+			if strings.Contains(msg, "Zq9") || jsonErrorWording.MatchString(msg) {
+				t.Fatalf("file content may have leaked into a log message: %q", msg)
 			}
 		}
 	})
