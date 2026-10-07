@@ -5,19 +5,29 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  # Weekly run so newly published vulnerabilities (govulncheck) and new Go
+  # releases (stable) are caught even when nothing is pushed.
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   test:
-    name: test (go ${{ matrix.go }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         go: ['1.22', 'stable']
+    defaults:
+      run:
+        # bash on every OS: PowerShell splits arguments like -coverprofile=coverage.out.
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,9 +37,44 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
-      # gofmt output can differ between Go releases, so only enforce it on stable.
+      - name: go vet
+        run: go vet ./...
+
+      # Also runs each fuzz target's seed corpus.
+      - name: go test
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: coverage (report and minimum)
+        if: matrix.os == 'ubuntu-latest' && matrix.go == 'stable'
+        env:
+          MIN_COVERAGE: '90'
+        run: |
+          go tool cover -func=coverage.out > coverage.txt
+          total="$(awk '/^total:/ { sub(/%/, "", $NF); print $NF }' coverage.txt)"
+          {
+            echo "### Test coverage: ${total}% (minimum ${MIN_COVERAGE}%)"
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          awk -v total="$total" -v min="$MIN_COVERAGE" 'BEGIN {
+            if (total + 0 < min + 0) { printf "coverage %s%% is below the %s%% minimum\n", total, min; exit 1 }
+            printf "coverage %s%% (minimum %s%%)\n", total, min
+          }'
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 'stable'
+
       - name: gofmt
-        if: matrix.go == 'stable'
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
@@ -38,20 +83,51 @@ jobs:
             exit 1
           fi
 
-      - name: go vet
-        run: go vet ./...
-
-      # Runners are Linux-only; vet (which compiles tests too) for other OSes so
-      # platform-specific files such as jsto/open_other.go keep building.
-      - name: go vet (windows, darwin, freebsd)
-        if: matrix.go == 'stable'
+      - name: go.mod and go.sum are tidy and verified
         run: |
-          GOOS=windows go vet ./...
-          GOOS=darwin go vet ./...
-          GOOS=freebsd go vet ./...
+          go mod tidy -diff
+          go mod verify
 
-      - name: go test
-        run: go test -race -count=1 ./...
+      # Windows and macOS run the tests above; vet the BSD-only build tags too.
+      - name: go vet (freebsd)
+        run: GOOS=freebsd go vet ./...
+
+      # Checks configured in staticcheck.conf; pinned for reproducible results.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
+      - name: README examples build
+        run: ./scripts/check-readme-examples.sh
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 'stable'
+
+      - name: fuzz (30s per target)
+        run: |
+          go test -run '^$' -fuzz '^FuzzCLI$' -fuzztime 30s .
+          go test -run '^$' -fuzz '^FuzzIdentifiers$' -fuzztime 30s .
+          go test -run '^$' -fuzz '^FuzzLoad$' -fuzztime 30s ./jsto
+
+      # A failing input is written under testdata/fuzz; keep it so it can be
+      # reproduced locally with `go test -run <FuzzTarget>/<id>`.
+      - name: upload failing fuzz inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-failures
+          path: |
+            testdata/fuzz
+            jsto/testdata/fuzz
+          if-no-files-found: ignore
 
   govulncheck:
     runs-on: ubuntu-latest

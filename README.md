@@ -134,12 +134,39 @@ Errors are wrapped with context, so check them with `errors.Is`.
 Transporter is currently dependent on the [ALE](https://github.com/seanmmitchell/ale) logging system. By default it creates its own console engine that only prints Warning and above, so it stays quiet unless something is wrong. The config file engine (jsto) logs to `ConfigFileLogEngine`, which falls back to `LogEngine`, so one engine controls everything. To change that, pass your own engine:
 
 ```go
-pCTX, _ := pconsole.New(30, 20)
-le := ale.CreateLogEngine("Transporter")
-le.AddLogPipeline(ale.Error, pCTX.Log) // Error+ only; use ale.Debug to see everything,
-                                       // or add no pipeline at all to silence Transporter.
-state, err := transporter.Energize(pattern, transporter.Options{LogEngine: le})
+package main
+
+import (
+	"log"
+
+	"github.com/seanmmitchell/ale/v2"
+	"github.com/seanmmitchell/ale/v2/pconsole"
+	"github.com/seanmmitchell/transporter/v2"
+)
+
+func main() {
+	pCTX, err := pconsole.New(30, 20)
+	if err != nil {
+		log.Fatal(err)
+	}
+	le := ale.CreateLogEngine("Transporter")
+	// Error and above only; use ale.Debug to see everything,
+	// or add no pipeline at all to silence Transporter.
+	le.AddLogPipeline(ale.Error, pCTX.Log)
+
+	pattern := transporter.Pattern{Sequences: map[string]transporter.PatternSequence{
+		"port": {CLIFlags: []string{"port"}, Value: "8080"},
+	}}
+	state, err := transporter.Energize(pattern, transporter.Options{LogEngine: le})
+	if err != nil {
+		log.Fatal(err)
+	}
+	port, _ := state.Get("port")
+	log.Println("port:", port)
+}
 ```
+
+Every Go example in this README is a complete program; CI builds them all (`scripts/check-readme-examples.sh`).
 
 This is something that could be modified in the future for larger support if needed.
 
