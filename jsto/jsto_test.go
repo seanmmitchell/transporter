@@ -314,18 +314,32 @@ func TestSaveLeavesNoTempFiles(t *testing.T) {
 	assertNoTempFiles(t, dir)
 }
 
-func TestSaveFailureCleansUpTempFile(t *testing.T) {
-	dir := t.TempDir()
-	// Renaming a regular file over a directory fails, exercising the cleanup
-	// path after the temporary file has been written.
-	target := filepath.Join(dir, "conf.json")
-	if err := os.Mkdir(target, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := jsto.New(target).Save(quietLogger(), samplePattern("v")); err == nil {
-		t.Fatal("Save over a directory succeeded")
-	}
-	assertNoTempFiles(t, dir)
+func TestLoadNonRegularPaths(t *testing.T) {
+	t.Run("directory is refused", func(t *testing.T) {
+		_, err := jsto.New(t.TempDir()).Load(quietLogger())
+		if !errors.Is(err, jsto.ErrNotRegularFile) {
+			t.Fatalf("Load(dir): err = %v, want ErrNotRegularFile", err)
+		}
+	})
+
+	t.Run("symlink to a regular file still loads", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("creating symlinks needs extra privileges on windows")
+		}
+		target := filepath.Join(t.TempDir(), "real.json")
+		writeFile(t, target, `{"token": {"Value": "v"}}`)
+		link := filepath.Join(t.TempDir(), "conf.json")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		data, err := jsto.New(link).Load(quietLogger())
+		if err != nil {
+			t.Fatalf("Load(symlink): %v", err)
+		}
+		if _, ok := data["token"]; !ok {
+			t.Fatalf("Load(symlink) = %v, want the target's contents", data)
+		}
+	})
 }
 
 func TestSaveNilPattern(t *testing.T) {

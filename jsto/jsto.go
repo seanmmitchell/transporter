@@ -1,3 +1,6 @@
+// Package jsto stores a transporter Pattern as a JSON file. Use New(path) as
+// transporter.Options.ConfigFileEngine. Files are written atomically with
+// mode 0600, and only regular files are read or written.
 package jsto
 
 import (
@@ -18,8 +21,9 @@ import (
 var (
 	// ErrInvalidJSON is wrapped by Load errors for files that are not a valid JSON object.
 	ErrInvalidJSON = errors.New("jsto: invalid JSON")
-	// ErrNotRegularFile is returned by Save when FilePath exists but is not a
-	// regular file (a symlink, directory, device, FIFO, ...).
+	// ErrNotRegularFile is returned when FilePath exists but is not a regular
+	// file: by Save for a symlink, directory, device or FIFO, and by Load for
+	// anything that does not resolve to a regular file (a FIFO would block).
 	ErrNotRegularFile = errors.New("jsto: config path is not a regular file")
 
 	errEmptyPath  = errors.New("jsto: FilePath is empty")
@@ -54,6 +58,13 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 		return nil, errEmptyPath
 	}
 
+	// Only read regular files (following links, as reading always has): a FIFO
+	// would block forever and a device could be read without end.
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		le.Log(ale.Error, fmt.Sprintf("\t==> JSON file path %q is not a regular file.", path))
+		return nil, fmt.Errorf("%w: %q", ErrNotRegularFile, path)
+	}
+
 	le.Log(ale.Verbose, "Reading JSON File...")
 	allBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -62,7 +73,8 @@ func (conf *JSONConfig) Load(le *ale.LogEngine) (map[string]interface{}, error) 
 		} else {
 			le.Log(ale.Error, fmt.Sprintf("\t==> Failed to read JSON file. Error: %q", err))
 		}
-		return nil, fmt.Errorf("jsto: reading %q: %w", path, err)
+		// The os error already names the path.
+		return nil, fmt.Errorf("jsto: reading config: %w", err)
 	}
 	le.Log(ale.Verbose, "JSON File Read.")
 
@@ -142,7 +154,7 @@ func (conf *JSONConfig) Save(le *ale.LogEngine, pattern *transporter.Pattern) er
 func writeFileAtomic(path string, data []byte) (err error) {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("jsto: creating temp file for %q: %w", path, err)
+		return fmt.Errorf("jsto: creating temp file: %w", err)
 	}
 	tmpPath := f.Name()
 	defer func() {
@@ -154,16 +166,16 @@ func writeFileAtomic(path string, data []byte) (err error) {
 
 	// os.CreateTemp already creates the file with mode 0600.
 	if _, err = f.Write(data); err != nil {
-		return fmt.Errorf("jsto: writing %q: %w", tmpPath, err)
+		return fmt.Errorf("jsto: writing temp file: %w", err)
 	}
 	if err = f.Sync(); err != nil {
-		return fmt.Errorf("jsto: syncing %q: %w", tmpPath, err)
+		return fmt.Errorf("jsto: syncing temp file: %w", err)
 	}
 	if err = f.Close(); err != nil {
-		return fmt.Errorf("jsto: closing %q: %w", tmpPath, err)
+		return fmt.Errorf("jsto: closing temp file: %w", err)
 	}
 	if err = os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("jsto: replacing %q: %w", path, err)
+		return fmt.Errorf("jsto: replacing config: %w", err)
 	}
 	return nil
 }
