@@ -116,6 +116,7 @@ Errors are wrapped with context, so check them with `errors.Is`.
 | `ErrRequiredMissing`     | Energize     | A `Required` sequence has no value after loading.                          |
 | `jsto.ErrInvalidJSON`    | Load (and so Energize) | The config file is not a JSON object.                            |
 | `jsto.ErrNotRegularFile` | Save (and so Materialize), Load (and so Energize) | Save: the config path is a symlink, directory or other non-regular file. Load: the path resolves to a FIFO, device or directory (a dangling link is reported as missing instead). |
+| `jsto.ErrFileTooLarge`   | Load (and so Energize) | The config file is over 16 MiB.                                  |
 
 `Energize` also fails when the config file exists but cannot be read or parsed. A missing file is not an error. A custom `ConfigFileInterface` must return an error wrapping `fs.ErrNotExist` for a missing file, and its `Save` (like any log pipeline) must not call `Materialize`, which would deadlock. Always obtain a `State` from `Energize`; a zero `State` is not usable.
 
@@ -124,7 +125,7 @@ Errors are wrapped with context, so check them with `errors.Is`.
 - `Materialize` persists every value, including ones that came from the environment or CLI. Mark secrets with `DisablePersistence`: they are saved as `"no persistence"`, and the in-memory value stays usable.
 - Keep the config file in a directory only its owner can write. jsto writes it atomically with `0600` permissions: a temp file in the same directory is renamed over it, so that directory must be writable, and the file's owner becomes the writing user. On Windows `0600` does not restrict readers.
 - `jsto.Save` refuses (`ErrNotRegularFile`) a config path that is a symlink, directory, device or FIFO. Following a link would let one planted in a shared directory such as `/tmp` redirect the write (e.g. to `~/.bashrc`), and replacing `/dev/null` would break the system. Point `jsto.New` at the real file instead. Only the last path element is checked: symlinked parent directories are followed.
-- `jsto.Load` reads through links (on Linux, `fs.protected_symlinks` stops other users' links in sticky directories such as `/tmp`; other systems have no such check). It refuses a path that resolves to a directory, device or FIFO, checking the file it actually opened, and reads at most 16 MiB, since some special files report as regular yet never end. A dangling link counts as a missing file.
+- `jsto.Load` reads through links (on Linux, `fs.protected_symlinks` stops other users' links in sticky directories such as `/tmp`; other systems have no such check). It refuses a path that resolves to a directory, device or FIFO, checking the file it actually opened, and reads at most 16 MiB, since some special files report as regular yet never end. A dangling link counts as a missing file. If another process holds a lease on the file (e.g. a Samba oplock), `Load` waits for it to be released, up to 60 seconds.
 - jsto parse errors report only a byte offset, never file content. The CLI dump prints only flags Transporter knows; values, positionals and unknown flags appear as `<redacted>`.
 - `jsto.Save` rewrites the whole file with only the pattern's keys. Other keys in the file are dropped.
 - Values must be valid UTF-8: invalid bytes come back as U+FFFD after a save and reload (standard JSON encoding).
@@ -170,7 +171,7 @@ This is something that could be modified in the future for larger support if nee
 | A custom `ConfigFileInterface.Load` could return any error for a missing file | It must wrap `fs.ErrNotExist`, or `Energize` fails on a first run with no file yet. |
 | jsto wrote through a symlinked config path                     | `Load` still reads through it, but `Save` (and so `Materialize`) returns `ErrNotRegularFile`. Point `jsto.New` at the real file. |
 | jsto wrote the file in place, mode 0644                        | Writes a 0600 temp file and renames it over the config: the directory must be writable, hard links to the file break, and the file's owner becomes the writing user. |
-| jsto read FIFOs, devices and files of any size                  | `Load` returns `ErrNotRegularFile` for FIFOs, devices and directories, and fails on files over 16 MiB. |
+| jsto read FIFOs, devices and files of any size                  | `Load` returns `ErrNotRegularFile` for FIFOs, devices and directories, and `ErrFileTooLarge` for files over 16 MiB. |
 
 ## License
 This work is licensed under the MIT License.  
